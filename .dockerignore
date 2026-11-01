@@ -1,0 +1,10 @@
+# Send only what the app needs. Everything else (including .env, .venv, tests, plans,
+# outputs/runs, .cache, and the instructions document) stays out of the image.
+*
+!pyproject.toml
+!uv.lock
+!.python-version
+!src/
+!data/raw/
+**/__pycache__
+**/*.pyc

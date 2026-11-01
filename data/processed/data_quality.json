@@ -1,0 +1,316 @@
+{
+  "source_file": "data/raw/ma_transactions_500.csv",
+  "row_count": 500,
+  "column_count": 24,
+  "unexpected_columns": [],
+  "transaction_id_checks": {
+    "unique": true,
+    "empty_id_csv_lines": [],
+    "duplicate_ids": []
+  },
+  "blank_counts": {
+    "days_to_close": 94
+  },
+  "days_to_close_blank_by_closed": {
+    "closed": 0,
+    "not_closed": 94
+  },
+  "invalid_values": [],
+  "unexpected_category_values": [],
+  "category_counts": {
+    "outcome": {
+      "Closed": 406,
+      "Withdrawn": 49,
+      "Pending": 21,
+      "Terminated": 14,
+      "Rumored": 10
+    },
+    "acquirer_type": {
+      "Financial Sponsor": 290,
+      "Strategic": 210
+    },
+    "sector": {
+      "Behavioral Health": 70,
+      "Home Health/Hospice": 62,
+      "Physician Groups": 60,
+      "Health IT": 50,
+      "Dental": 46,
+      "Healthcare Services": 46,
+      "Health Insurance": 43,
+      "Revenue Cycle": 43,
+      "Medical Devices": 42,
+      "Pharma/Biotech": 38
+    },
+    "deal_type": {
+      "Leveraged Buyout": 66,
+      "Platform Investment": 60,
+      "Bolt-on Acquisition": 57,
+      "Recapitalization": 56,
+      "SPAC Merger": 50,
+      "Strategic Acquisition": 48,
+      "Management Buyout": 47,
+      "Minority Investment": 42,
+      "Merger of Equals": 40,
+      "Carve-out": 34
+    },
+    "geography": {
+      "Midwest": 63,
+      "Southeast": 59,
+      "Mountain West": 53,
+      "Mid-Atlantic": 51,
+      "National": 51,
+      "Northeast": 51,
+      "Great Plains": 46,
+      "Multi-Regional": 44,
+      "West Coast": 42,
+      "Southwest": 40
+    },
+    "target_ownership_pre": {
+      "Private": 208,
+      "PE-Backed": 141,
+      "Public": 76,
+      "Non-Profit": 75
+    },
+    "financing_type": {
+      "Stock": 80,
+      "All Cash": 79,
+      "Seller Financing": 74,
+      "Mixed": 69,
+      "Cash + Stock": 68,
+      "Leveraged": 66,
+      "Earnout": 64
+    },
+    "deal_quarter": {
+      "Q2": 142,
+      "Q4": 136,
+      "Q1": 128,
+      "Q3": 94
+    }
+  },
+  "deal_year_counts": {
+    "2015": 16,
+    "2016": 29,
+    "2017": 42,
+    "2018": 48,
+    "2019": 62,
+    "2020": 82,
+    "2021": 79,
+    "2022": 70,
+    "2023": 49,
+    "2024": 23
+  },
+  "percent_scale": {
+    "ebitda_margin_pct": {
+      "min": 1.7,
+      "max": 33.6,
+      "scale": "0-100"
+    },
+    "revenue_growth_pct": {
+      "min": 2.7,
+      "max": 27.7,
+      "scale": "0-100"
+    },
+    "synergy_pct_of_deal": {
+      "min": 2.0,
+      "max": 22.0,
+      "scale": "0-100"
+    }
+  },
+  "size_bands": {
+    "edges": "lower edge inclusive, upper edge exclusive (in $M): Under $100M = [0, 100); $100M–$400M = [100, 400); $400M–$1B = [400, 1000); Over $1B = [1000, inf)",
+    "counts": {
+      "Under $100M": 203,
+      "$100M–$400M": 154,
+      "$400M–$1B": 77,
+      "Over $1B": 66
+    },
+    "unbanded": 0
+  },
+  "acquirers": {
+    "distinct": 107,
+    "with_2_plus_deals": 73,
+    "with_3_plus_deals": 51,
+    "single_deal": 34,
+    "top_10_by_deal_count": [
+      {
+        "acquirer_key": "blackstone",
+        "deal_count": 25
+      },
+      {
+        "acquirer_key": "bain capital",
+        "deal_count": 24
+      },
+      {
+        "acquirer_key": "nordic capital",
+        "deal_count": 24
+      },
+      {
+        "acquirer_key": "vista equity",
+        "deal_count": 24
+      },
+      {
+        "acquirer_key": "warburg pincus",
+        "deal_count": 23
+      },
+      {
+        "acquirer_key": "welsh carson",
+        "deal_count": 23
+      },
+      {
+        "acquirer_key": "new mountain capital",
+        "deal_count": 21
+      },
+      {
+        "acquirer_key": "advent international",
+        "deal_count": 18
+      },
+      {
+        "acquirer_key": "tpg capital",
+        "deal_count": 18
+      },
+      {
+        "acquirer_key": "kkr",
+        "deal_count": 17
+      }
+    ]
+  },
+  "focus_sector": {
+    "sector": "Healthcare Services",
+    "total": {
+      "value": 46,
+      "display": "46",
+      "source_ids": [
+        "MA-2016-0065",
+        "MA-2016-0469",
+        "MA-2017-0196",
+        "MA-2017-0289",
+        "MA-2018-0357",
+        "MA-2018-0470",
+        "MA-2018-0486",
+        "MA-2019-0090",
+        "MA-2019-0352",
+        "MA-2019-0374",
+        "MA-2019-0382",
+        "MA-2019-0444",
+        "MA-2020-0102",
+        "MA-2020-0232",
+        "MA-2020-0274",
+        "MA-2020-0304",
+        "MA-2020-0306",
+        "MA-2020-0312",
+        "MA-2020-0387",
+        "MA-2020-0408",
+        "MA-2020-0412",
+        "MA-2020-0471",
+        "MA-2020-0496",
+        "MA-2021-0066",
+        "MA-2021-0083",
+        "MA-2021-0195",
+        "MA-2021-0226",
+        "MA-2021-0399",
+        "MA-2021-0407",
+        "MA-2021-0425",
+        "MA-2022-0045",
+        "MA-2022-0183",
+        "MA-2022-0187",
+        "MA-2022-0245",
+        "MA-2022-0281",
+        "MA-2022-0311",
+        "MA-2022-0345",
+        "MA-2022-0350",
+        "MA-2022-0389",
+        "MA-2023-0221",
+        "MA-2023-0330",
+        "MA-2023-0445",
+        "MA-2023-0466",
+        "MA-2024-0120",
+        "MA-2024-0251",
+        "MA-2024-0339"
+      ]
+    },
+    "size_100_400": {
+      "value": 12,
+      "display": "12",
+      "source_ids": [
+        "MA-2018-0470",
+        "MA-2019-0352",
+        "MA-2020-0232",
+        "MA-2020-0304",
+        "MA-2020-0306",
+        "MA-2020-0408",
+        "MA-2021-0195",
+        "MA-2021-0407",
+        "MA-2022-0350",
+        "MA-2022-0389",
+        "MA-2023-0221",
+        "MA-2024-0120"
+      ]
+    },
+    "size_100_400_closed": {
+      "value": 10,
+      "display": "10",
+      "source_ids": [
+        "MA-2018-0470",
+        "MA-2019-0352",
+        "MA-2020-0232",
+        "MA-2020-0304",
+        "MA-2020-0306",
+        "MA-2020-0408",
+        "MA-2021-0195",
+        "MA-2021-0407",
+        "MA-2022-0350",
+        "MA-2024-0120"
+      ]
+    }
+  },
+  "strong_margin": {
+    "definition": "Strong EBITDA margin = above the Healthcare Services median EBITDA margin (all deals in the sector, any outcome).",
+    "threshold_pct": 15.5,
+    "threshold_display": "15.5%",
+    "p75_pct": 16.8,
+    "p75_display": "16.8%",
+    "n": 46
+  },
+  "adjacency_threshold": 0.6,
+  "min_comps_sample": 3,
+  "consistency_checks": [
+    {
+      "check": "ebitda_margin_pct differs from target_ebitda_mm / target_revenue_mm by more than 1 point",
+      "rows": 411,
+      "example_ids": [
+        "MA-2015-0050",
+        "MA-2015-0145",
+        "MA-2015-0155",
+        "MA-2015-0194",
+        "MA-2015-0248"
+      ]
+    },
+    {
+      "check": "ev_ebitda_multiple differs from deal_size_mm / target_ebitda_mm by more than 10%",
+      "rows": 403,
+      "example_ids": [
+        "MA-2015-0031",
+        "MA-2015-0050",
+        "MA-2015-0141",
+        "MA-2015-0145",
+        "MA-2015-0155"
+      ]
+    },
+    {
+      "check": "ev_revenue_multiple differs from deal_size_mm / target_revenue_mm by more than 10%",
+      "rows": 0,
+      "example_ids": []
+    }
+  ],
+  "assumptions": [
+    "transaction_id from the raw file is the only ID; no new IDs are created.",
+    "is_closed is true only for outcome 'Closed'; Withdrawn, Pending, Terminated and Rumored are not closed.",
+    "is_regional is true for named regions; 'National' and 'Multi-Regional' are not regional.",
+    "Percentage columns are kept on their original 0-100 scale.",
+    "Invalid numbers become blank in calculations (never zero); the raw text is kept in transactions.csv.",
+    "Sector medians, margin thresholds and sponsor share use all deals in the sector; valuation comps and buyer-paid multiples use closed deals only.",
+    "Stated columns (margins, multiples) are used as given and never re-derived.",
+    "List-valued CSV cells (source IDs, tags, sectors) are JSON lists.",
+    "Sub-sector differs from sector in 0 rows."
+  ]
+}

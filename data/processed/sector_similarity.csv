@@ -1,0 +1,101 @@
+sector_a,sector_b,closeness,is_adjacent,reason
+Healthcare Services,Healthcare Services,1.0,True,Same sector.
+Healthcare Services,Physician Groups,0.8,True,Both are provider services built around clinicians and patient visits.
+Healthcare Services,Behavioral Health,0.75,True,Both are provider services with similar reimbursement and site-of-care models.
+Healthcare Services,Home Health/Hospice,0.75,True,"Both are provider services delivering care to patients, often regionally."
+Healthcare Services,Dental,0.7,True,Dental service organizations are provider services with a practice roll-up model.
+Healthcare Services,Revenue Cycle,0.5,False,Revenue cycle firms sell services to providers rather than deliver care.
+Healthcare Services,Health IT,0.35,False,Health IT sells software to providers; different business model.
+Healthcare Services,Health Insurance,0.3,False,Insurers pay providers; related through value-based care only.
+Healthcare Services,Medical Devices,0.15,False,"Device makers sell products, not care services."
+Healthcare Services,Pharma/Biotech,0.1,False,Drug development has little overlap with care delivery.
+Physician Groups,Healthcare Services,0.8,True,Both are provider services built around clinicians and patient visits.
+Physician Groups,Physician Groups,1.0,True,Same sector.
+Physician Groups,Behavioral Health,0.6,True,Both are clinician-led outpatient practices.
+Physician Groups,Home Health/Hospice,0.55,False,"Physician referrals drive home health, but care settings differ."
+Physician Groups,Dental,0.6,True,Dental and physician practice management share the roll-up model.
+Physician Groups,Revenue Cycle,0.5,False,Physician groups are major revenue cycle customers.
+Physician Groups,Health IT,0.35,False,Physician groups buy practice software; different business model.
+Physician Groups,Health Insurance,0.4,False,Value-based care links insurers and physician groups.
+Physician Groups,Medical Devices,0.15,False,"Physicians use devices, but the businesses differ."
+Physician Groups,Pharma/Biotech,0.1,False,Little overlap beyond prescribing.
+Behavioral Health,Healthcare Services,0.75,True,Both are provider services with similar reimbursement and site-of-care models.
+Behavioral Health,Physician Groups,0.6,True,Both are clinician-led outpatient practices.
+Behavioral Health,Behavioral Health,1.0,True,Same sector.
+Behavioral Health,Home Health/Hospice,0.55,False,Both deliver community and home-based care.
+Behavioral Health,Dental,0.4,False,Both are outpatient provider services with different clinical focus.
+Behavioral Health,Revenue Cycle,0.35,False,Behavioral providers buy billing services; different business model.
+Behavioral Health,Health IT,0.3,False,Behavioral EHR vendors serve these providers; different business model.
+Behavioral Health,Health Insurance,0.3,False,Insurers manage behavioral benefits; payer versus provider.
+Behavioral Health,Medical Devices,0.1,False,Little overlap.
+Behavioral Health,Pharma/Biotech,0.15,False,Psychiatric medicines are a weak link to care delivery.
+Home Health/Hospice,Healthcare Services,0.75,True,"Both are provider services delivering care to patients, often regionally."
+Home Health/Hospice,Physician Groups,0.55,False,"Physician referrals drive home health, but care settings differ."
+Home Health/Hospice,Behavioral Health,0.55,False,Both deliver community and home-based care.
+Home Health/Hospice,Home Health/Hospice,1.0,True,Same sector.
+Home Health/Hospice,Dental,0.35,False,"Both are provider services, but care settings differ."
+Home Health/Hospice,Revenue Cycle,0.35,False,Home health agencies buy billing services; different business model.
+Home Health/Hospice,Health IT,0.3,False,Home care software serves these agencies; different business model.
+Home Health/Hospice,Health Insurance,0.35,False,Medicare Advantage plans increasingly manage home-based care.
+Home Health/Hospice,Medical Devices,0.15,False,Home medical equipment is a weak link.
+Home Health/Hospice,Pharma/Biotech,0.1,False,Little overlap.
+Dental,Healthcare Services,0.7,True,Dental service organizations are provider services with a practice roll-up model.
+Dental,Physician Groups,0.6,True,Dental and physician practice management share the roll-up model.
+Dental,Behavioral Health,0.4,False,Both are outpatient provider services with different clinical focus.
+Dental,Home Health/Hospice,0.35,False,"Both are provider services, but care settings differ."
+Dental,Dental,1.0,True,Same sector.
+Dental,Revenue Cycle,0.3,False,Dental practices buy billing services; different business model.
+Dental,Health IT,0.25,False,Dental practice software is a weak link.
+Dental,Health Insurance,0.2,False,Dental benefits are a separate insurance line.
+Dental,Medical Devices,0.3,False,Dental devices and aligners sell into dental practices.
+Dental,Pharma/Biotech,0.1,False,Little overlap.
+Revenue Cycle,Healthcare Services,0.5,False,Revenue cycle firms sell services to providers rather than deliver care.
+Revenue Cycle,Physician Groups,0.5,False,Physician groups are major revenue cycle customers.
+Revenue Cycle,Behavioral Health,0.35,False,Behavioral providers buy billing services; different business model.
+Revenue Cycle,Home Health/Hospice,0.35,False,Home health agencies buy billing services; different business model.
+Revenue Cycle,Dental,0.3,False,Dental practices buy billing services; different business model.
+Revenue Cycle,Revenue Cycle,1.0,True,Same sector.
+Revenue Cycle,Health IT,0.7,True,Both are technology-enabled services sold to providers.
+Revenue Cycle,Health Insurance,0.4,False,Both sit in the claims and payment flow.
+Revenue Cycle,Medical Devices,0.1,False,Little overlap.
+Revenue Cycle,Pharma/Biotech,0.1,False,Little overlap.
+Health IT,Healthcare Services,0.35,False,Health IT sells software to providers; different business model.
+Health IT,Physician Groups,0.35,False,Physician groups buy practice software; different business model.
+Health IT,Behavioral Health,0.3,False,Behavioral EHR vendors serve these providers; different business model.
+Health IT,Home Health/Hospice,0.3,False,Home care software serves these agencies; different business model.
+Health IT,Dental,0.25,False,Dental practice software is a weak link.
+Health IT,Revenue Cycle,0.7,True,Both are technology-enabled services sold to providers.
+Health IT,Health IT,1.0,True,Same sector.
+Health IT,Health Insurance,0.35,False,Insurers buy data and software; payer versus vendor.
+Health IT,Medical Devices,0.25,False,Connected devices overlap with health software.
+Health IT,Pharma/Biotech,0.2,False,Life-sciences data and software is a modest link.
+Health Insurance,Healthcare Services,0.3,False,Insurers pay providers; related through value-based care only.
+Health Insurance,Physician Groups,0.4,False,Value-based care links insurers and physician groups.
+Health Insurance,Behavioral Health,0.3,False,Insurers manage behavioral benefits; payer versus provider.
+Health Insurance,Home Health/Hospice,0.35,False,Medicare Advantage plans increasingly manage home-based care.
+Health Insurance,Dental,0.2,False,Dental benefits are a separate insurance line.
+Health Insurance,Revenue Cycle,0.4,False,Both sit in the claims and payment flow.
+Health Insurance,Health IT,0.35,False,Insurers buy data and software; payer versus vendor.
+Health Insurance,Health Insurance,1.0,True,Same sector.
+Health Insurance,Medical Devices,0.1,False,Little overlap.
+Health Insurance,Pharma/Biotech,0.2,False,Pharmacy benefits link insurers and drug makers.
+Medical Devices,Healthcare Services,0.15,False,"Device makers sell products, not care services."
+Medical Devices,Physician Groups,0.15,False,"Physicians use devices, but the businesses differ."
+Medical Devices,Behavioral Health,0.1,False,Little overlap.
+Medical Devices,Home Health/Hospice,0.15,False,Home medical equipment is a weak link.
+Medical Devices,Dental,0.3,False,Dental devices and aligners sell into dental practices.
+Medical Devices,Revenue Cycle,0.1,False,Little overlap.
+Medical Devices,Health IT,0.25,False,Connected devices overlap with health software.
+Medical Devices,Health Insurance,0.1,False,Little overlap.
+Medical Devices,Medical Devices,1.0,True,Same sector.
+Medical Devices,Pharma/Biotech,0.5,False,Both are regulated life-sciences product makers.
+Pharma/Biotech,Healthcare Services,0.1,False,Drug development has little overlap with care delivery.
+Pharma/Biotech,Physician Groups,0.1,False,Little overlap beyond prescribing.
+Pharma/Biotech,Behavioral Health,0.15,False,Psychiatric medicines are a weak link to care delivery.
+Pharma/Biotech,Home Health/Hospice,0.1,False,Little overlap.
+Pharma/Biotech,Dental,0.1,False,Little overlap.
+Pharma/Biotech,Revenue Cycle,0.1,False,Little overlap.
+Pharma/Biotech,Health IT,0.2,False,Life-sciences data and software is a modest link.
+Pharma/Biotech,Health Insurance,0.2,False,Pharmacy benefits link insurers and drug makers.
+Pharma/Biotech,Medical Devices,0.5,False,Both are regulated life-sciences product makers.
+Pharma/Biotech,Pharma/Biotech,1.0,True,Same sector.

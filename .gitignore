@@ -218,3 +218,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project outputs
+outputs/runs/
+.cache/
+
+# macOS
+.DS_Store
+
+# Assignment brief (not part of the submission)
+Agentic_Take_Home_Instructions.docx
