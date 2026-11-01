@@ -4,7 +4,7 @@ import json
 import pandas as pd
 import pytest
 
-from ma_engine import prepare
+from ma_engine.data import prepare
 from ma_engine.config import RAW_CSV
 
 BASE_ROW = {

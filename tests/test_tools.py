@@ -3,7 +3,7 @@ from fastmcp import Client
 
 from ma_engine.mcp_server import tools
 from ma_engine.mcp_server.server import mcp
-from ma_engine.prepare import fmt_money, fmt_multiple, fmt_pct
+from ma_engine.data.prepare import fmt_money, fmt_multiple, fmt_pct
 
 HCS = "Healthcare Services"
 MID = "$100M–$400M"

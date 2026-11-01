@@ -6,8 +6,8 @@ Every number has a display string, and every explanation is a template filled wi
 strings or whole counts, so the agent can quote it as evidence. Stated margins and multiples
 are never re-derived; deals that did not close add nothing to the score.
 
-Run `python -m ma_engine.ranking` to rank the default target and print a diagnostic table, or
-`python -m ma_engine.ranking --sensitivity` for the top 10 under alternative weights, adjacency
+Run `python -m ma_engine.data.ranking` to rank the default target and print a diagnostic table, or
+`python -m ma_engine.data.ranking --sensitivity` for the top 10 under alternative weights, adjacency
 thresholds, no small-sample prior and balanced buyer-type coverage (`--sector` and `--ev` change the target).
 """
 
@@ -22,7 +22,7 @@ import pandas as pd
 from ma_engine.clients.data_client import get_client, rank_stat_id
 from ma_engine.config import DEFAULT_TARGET, REPORT_COUNT, SHORTLIST_SIZE
 from ma_engine.models import ANY_REGION, Target
-from ma_engine.prepare import fmt_money, normalize_acquirer, round_half_up, size_band
+from ma_engine.data.prepare import fmt_money, normalize_acquirer, round_half_up, size_band
 
 WEIGHTS = {
     "sector_fit": 0.25,

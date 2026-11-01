@@ -13,7 +13,10 @@ from mcp.shared.exceptions import MCPError
 from test_agent import FakeLLM, bad_draft, buyer_key, committee_policy, evidence_policy, \
     good_draft, research_round
 
-from ma_engine import config, engine, guardrails, prepare
+from ma_engine import config
+from ma_engine.research import engine
+from ma_engine.validation import guardrails
+from ma_engine.data import prepare
 from ma_engine.clients import data_client, mcp_client
 
 

@@ -371,7 +371,7 @@ def _show_recorded(event: dict, key: str | None, scrub) -> None:
 
 def stage_groups(events):
     """Partition saved steps once; unknown/setup events remain inspectable."""
-    from ma_engine.agent import RESEARCH_STAGES
+    from ma_engine.research.agent import RESEARCH_STAGES
     groups = [{**stage, "steps": []} for stage in RESEARCH_STAGES]
     technical = {"id": "technical", "label": "Technical event log", "steps": []}
     for event in order_events(events):

@@ -12,11 +12,11 @@ tests call the tool functions directly.
 
 from typing import Literal
 
-from ma_engine import ranking
+from ma_engine.data import ranking
 from ma_engine.clients.data_client import get_client, sector_stat_id
 from ma_engine.config import DEFAULT_TARGET, SHORTLIST_SIZE
 from ma_engine.models import Target
-from ma_engine.prepare import (
+from ma_engine.data.prepare import (
     ALL_SIZES,
     CLOSED,
     KNOWN_VALUES,

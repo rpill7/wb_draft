@@ -16,14 +16,15 @@ from streamlit.testing.v1 import AppTest
 from test_activity import deal_answer
 from test_agent import FakeLLM, bad_draft, buyer_key, committee_policy, good_draft, research_round
 
-from ma_engine import config, engine
+from ma_engine import config
+from ma_engine.research import engine
 from ma_engine.clients import mcp_client
 from ma_engine.clients.llm_client import LLMResult, _parse
 from ma_engine.clients.mcp_client import MCPClient
 from ma_engine.mcp_server.server import mcp as server
-from ma_engine.agent import RequestError
+from ma_engine.research.agent import RequestError
 from ma_engine.models import FollowupAnswer, RequestFields, Target
-from ma_engine.ui_trace import (
+from ma_engine.ui.activity import (
     PREVIEW_LIMIT,
     as_markdown,
     activity_label,
@@ -209,7 +210,7 @@ def _html_of(*parts: str) -> str:
 
 
 def test_stage_rows_sum_recorded_durations_and_leave_later_stages_pending():
-    from ma_engine.ui_report import stage_rows
+    from ma_engine.ui.reports import stage_rows
 
     rows = {row["id"]: row for row in stage_rows([
         {"step": 1, "category": "calculation", "name": "ranking", "status": "completed",
@@ -236,7 +237,7 @@ def test_stage_rows_sum_recorded_durations_and_leave_later_stages_pending():
 
 def _activity_script():
     import streamlit as st
-    from ma_engine.ui_trace import render_timeline
+    from ma_engine.ui.activity import render_timeline
 
     render_timeline(st.session_state.events, key_prefix=st.session_state.prefix,
                     names={"gtcr": "GTCR"}, scrub=lambda text: text.replace("sk-secret", "***"))
@@ -312,7 +313,7 @@ def test_two_responses_with_the_same_step_numbers_keep_separate_rows():
 
     def script():
         import streamlit as st
-        from ma_engine.ui_trace import render_timeline
+        from ma_engine.ui.activity import render_timeline
 
         for prefix, events in zip(st.session_state.prefixes, st.session_state.histories):
             render_timeline(events, key_prefix=prefix)
@@ -339,7 +340,7 @@ def test_two_responses_with_the_same_step_numbers_keep_separate_rows():
 
 def test_real_run_html_lists_every_buyer_and_every_citation_opens_its_source():
     """The measurement run. Skipped only when that folder is not on disk."""
-    from ma_engine.ui_report import (
+    from ma_engine.ui.reports import (
         buyer_block_html, esc, executive_summary_html, metric_items, metrics_strip_html,
         source_index,
     )
@@ -375,7 +376,7 @@ def test_real_run_html_lists_every_buyer_and_every_citation_opens_its_source():
         assert str(deal["record"][field]) in view, field
     stat = next(entry for entry in run["sources"]["entries"] if entry["kind"] == "statistic"
                 and len(entry["record"]["source_ids"]) > 5)
-    from ma_engine.ui_report import cite_html
+    from ma_engine.ui.reports import cite_html
     view = cite_html(stat, sources)
     assert stat["record"]["display"] in view and f"n = {stat['record']['n']}" in view
     assert f"Show all {len(stat['record']['source_ids'])} transactions" in view
@@ -392,7 +393,7 @@ def test_real_run_html_lists_every_buyer_and_every_citation_opens_its_source():
 def test_verification_wording_comes_from_the_saved_checks(monkeypatch):
     from types import SimpleNamespace
 
-    from ma_engine.ui_report import explain_issue, verification_html
+    from ma_engine.ui.reports import explain_issue, verification_html
 
     sample = ('valuation_context[0]: "n=4" is not the sample size of the cited statistic '
               "(stored n=10).")
@@ -560,7 +561,7 @@ def test_missing_key_explains_how_to_add_one(folders, monkeypatch):
     assert not at.exception
     assert "OPENROUTER_API_KEY is not set. Copy .env.example to .env" in errors(at)
     assert not list(config.RUNS_DIR.glob("*/reports.json"))
-    from ma_engine import submissions
+    from ma_engine.persistence import submissions
     assert "Find the 10 most likely acquirers" in submissions.unfinished()[0]["question"]
 
 
@@ -650,7 +651,7 @@ def test_example_request_shows_the_target_then_results_and_a_followup(folders, m
     shown = [text_ for text_ in summaries if any(text_ in value for value in order)]
     assert len(shown) <= 1, "no per-buyer paragraphs before the shortlist"
     assert not any('id="buyer-' in value for value in order), "no full reports in the chat"
-    from ma_engine.ui_report import conviction_level, status_text
+    from ma_engine.ui.reports import conviction_level, status_text
     cards = [button for button in at.button if button.key.startswith(f"top-{run['run_id']}-")]
     assert len(cards) == len(run["reports"]), "one card button per buyer"
     for card, report in zip(cards, sorted(run["reports"], key=lambda item: item.rank)):
@@ -1310,7 +1311,7 @@ def test_invalid_followup_shows_one_status_and_diagnostics(folders, monkeypatch)
 
 
 def test_history_restores_unfinished_question_in_fresh_browser_session(folders, monkeypatch):
-    from ma_engine import submissions
+    from ma_engine.persistence import submissions
     submissions.begin('My question submitted before a browser refresh')
     def unexpected(*args, **kwargs):
         raise AssertionError('Opening history must not restart research')
@@ -1324,7 +1325,7 @@ def test_history_restores_unfinished_question_in_fresh_browser_session(folders, 
 
 
 def test_new_question_saved_before_parsing_and_restored_after_failure(folders, monkeypatch):
-    from ma_engine import submissions
+    from ma_engine.persistence import submissions
     async def interrupted(text, progress=None):
         assert submissions.unfinished()[0]['question'] == text
         raise RuntimeError('Simulated interruption')
@@ -1341,7 +1342,7 @@ def test_new_question_saved_before_parsing_and_restored_after_failure(folders, m
 
 @pytest.mark.parametrize('location', ['sidebar', 'history'])
 def test_delete_unfinished_request_with_confirmation(folders, monkeypatch, location):
-    from ma_engine import submissions
+    from ma_engine.persistence import submissions
     block_research(monkeypatch)
     token = submissions.begin('Unfinished question to delete')
     at = start()

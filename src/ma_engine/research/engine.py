@@ -55,10 +55,10 @@ on `guardrails.build_sources`. Follow-up answers extend that file
     (a list) in the run folder. `run` must include `run_dir` (as `run_engine` and `load_run`
     return).
 
-Run headless with `uv run python -m ma_engine.engine` (default target).
+Run headless with `uv run python -m ma_engine.research.engine` (default target).
 """
 
-from ma_engine import submissions
+from ma_engine.persistence import submissions
 
 import asyncio
 import itertools
@@ -73,8 +73,9 @@ from pathlib import Path
 
 import openai
 
-from ma_engine import config, guardrails
-from ma_engine.agent import (Steps, activity_totals, answer_followup, call_llm, close_step,
+from ma_engine import config
+from ma_engine.validation import guardrails
+from ma_engine.research.agent import (Steps, activity_totals, answer_followup, call_llm, close_step,
                              display_research_title, llm_record, load_prompt, open_step,
                              parse_request, research_buyer, tool_decision, tool_output_summary)
 from ma_engine.clients.llm_client import scrub_secret

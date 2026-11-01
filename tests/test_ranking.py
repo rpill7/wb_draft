@@ -7,12 +7,12 @@ import pytest
 from fastmcp import Client
 from pydantic import ValidationError
 
-from ma_engine import ranking
+from ma_engine.data import ranking
 from ma_engine.clients.data_client import get_client
 from ma_engine.config import DEFAULT_TARGET, REPORT_COUNT
 from ma_engine.mcp_server.server import mcp
 from ma_engine.models import Target
-from ma_engine.prepare import NON_REGIONAL_GEOGRAPHIES, build_similarity
+from ma_engine.data.prepare import NON_REGIONAL_GEOGRAPHIES, build_similarity
 
 HCS = "Healthcare Services"
 TARGET = Target(sector=HCS, ev_mm=200, ownership="Private", geography="Any region",

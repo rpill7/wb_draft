@@ -2,7 +2,7 @@
 import json
 import re
 from ma_engine.clients.data_client import get_client, slug
-from ma_engine.prepare import fmt_money
+from ma_engine.data.prepare import fmt_money
 
 
 def saved_context(run, question):
@@ -75,7 +75,7 @@ def saved_context(run, question):
             for e in events.values() if e.get("category") == "mcp_tool"]})
     history = [{"question": h.get("question"), "status": h.get("status"),
                 "statements": h.get("statements")} for h in (run.get("followups") or [])[-6:]]
-    from ma_engine.ranking import evidence_review
+    from ma_engine.data.ranking import evidence_review
     reported = {r.acquirer_key for r in run.get("reports", [])}
     entries = [e for e in ranking.get("buyers", []) if e["acquirer_key"] in reported]
     comparison = None

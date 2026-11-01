@@ -15,8 +15,10 @@ import pytest
 from openai.types import Model
 from openai.types.chat import ChatCompletion
 
-from ma_engine import agent, config, engine, guardrails
-from ma_engine.agent import ReportError, agent_tools, research_buyer
+from ma_engine.research import agent, engine
+from ma_engine import config
+from ma_engine.validation import guardrails
+from ma_engine.research.agent import ReportError, agent_tools, research_buyer
 from ma_engine.clients.llm_client import (EMPTY_SUPPORTED_WARNING, OPTIONAL_PARAMETERS, LLMClient,
                                           LLMResult, _parse)
 from ma_engine.clients.mcp_client import MCPClient

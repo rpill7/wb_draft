@@ -13,13 +13,13 @@ import re
 from datetime import datetime
 from types import SimpleNamespace
 
-from ma_engine.agent import RESEARCH_STAGES
+from ma_engine.research.agent import RESEARCH_STAGES
 from ma_engine.clients.data_client import get_client
 from ma_engine.clients.llm_client import scrub_secret
-from ma_engine.guardrails import SECTIONS
+from ma_engine.validation.guardrails import SECTIONS
 from ma_engine.models import ANY_REGION
-from ma_engine.prepare import fmt_money, fmt_multiple, fmt_pct
-from ma_engine.ui_trace import merge_steps
+from ma_engine.data.prepare import fmt_money, fmt_multiple, fmt_pct
+from ma_engine.ui.activity import merge_steps
 
 # The six sections a banker reads, in report order.
 REPORT_SECTIONS = (

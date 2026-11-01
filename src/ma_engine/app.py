@@ -18,13 +18,16 @@ import pandas as pd
 import streamlit as st
 from pydantic import ValidationError
 
-from ma_engine import config, engine, guardrails, submissions
-from ma_engine.agent import RequestError, display_research_title
+from ma_engine import config
+from ma_engine.research import engine
+from ma_engine.validation import guardrails
+from ma_engine.persistence import submissions
+from ma_engine.research.agent import RequestError, display_research_title
 from ma_engine.clients.data_client import get_client
 from ma_engine.clients.llm_client import LLMConfigError
 from ma_engine.models import GEOGRAPHIES, OWNERSHIPS, Target
-from ma_engine.prepare import SECTORS
-from ma_engine.ui_report import (
+from ma_engine.data.prepare import SECTORS
+from ma_engine.ui.reports import (
     buyer_block_html,
     buyer_evidence_line,
     buyer_source_ids,
@@ -44,7 +47,7 @@ from ma_engine.ui_report import (
     target_sentence,
     verification_html,
 )
-from ma_engine.ui_trace import (
+from ma_engine.ui.activity import (
     LiveSteps,
     activity_label,
     as_markdown,

@@ -36,7 +36,7 @@ in an `assumption` field, which supports no ID). Then, per statement:
 Small counts ("6") appear in many buyer statistics, so the overlap rule cannot pin them to one
 statistic; prices, multiples, margins, names and years are distinctive enough to bind.
 
-`make check` (`python -m ma_engine.guardrails`) reads `reports.json` in the newest run folder
+`make check` (`python -m ma_engine.validation.guardrails`) reads `reports.json` in the newest run folder
 of `config.RUNS_DIR` (folder names are sortable timestamps such as `20261031-173000`):
 
     {"run_id": "20261031-173000",
@@ -89,7 +89,7 @@ from typing import NamedTuple
 from ma_engine import config
 from ma_engine.clients.data_client import get_client, slug
 from ma_engine.models import BuyerReport, ReportDraft, Statement
-from ma_engine.prepare import CLOSED, KNOWN_VALUES, NON_CLOSED_OUTCOMES, fmt_money
+from ma_engine.data.prepare import CLOSED, KNOWN_VALUES, NON_CLOSED_OUTCOMES, fmt_money
 
 ID_PATTERN = re.compile(r"MA-\d{4}-\d{4}")
 STAT_ID_PATTERN = re.compile(r"ST-(?:COMPS|PROFILE|SECTOR|RANK|RUN)-[a-z0-9_]+(?:-[a-z0-9_]+)*")

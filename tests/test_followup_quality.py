@@ -1,7 +1,7 @@
 """Quality regressions add requirements; existing citation checks remain mandatory."""
-from ma_engine.followup_context import check_answer_scope, saved_context
+from ma_engine.research.followup_context import check_answer_scope, saved_context
 from ma_engine.models import FollowupAnswer, Statement
-from ma_engine.ranking import evidence_review
+from ma_engine.data.ranking import evidence_review
 from test_activity import buyer_run  # shared saved-run fixture
 
 
@@ -53,7 +53,8 @@ def test_prior_filters_and_original_report_catalog_are_available(buyer_run):
 def test_truncated_research_is_not_mistaken_for_done(monkeypatch):
     import asyncio
     from types import SimpleNamespace
-    from ma_engine import agent, config
+    from ma_engine.research import agent
+    from ma_engine import config
     from ma_engine.clients.llm_client import LLMResult
     calls = []
     async def respond(*args, **kwargs):
@@ -81,7 +82,8 @@ def test_truncated_research_is_not_mistaken_for_done(monkeypatch):
 
 
 def test_citation_guide_only_repeats_supplied_evidence(buyer_run):
-    from ma_engine import agent, guardrails
+    from ma_engine.research import agent
+    from ma_engine.validation import guardrails
     ctx, data = saved_context(buyer_run, 'Blackstone report')
     ev = guardrails.build_answer_evidence(buyer_run['ranking']['target'], agent.run_entries(buyer_run),
                                          [{'result': data}])
@@ -94,7 +96,7 @@ def test_citation_guide_only_repeats_supplied_evidence(buyer_run):
 def test_saved_actions_use_records_and_never_call_model(buyer_run):
     import asyncio
     from types import SimpleNamespace
-    from ma_engine import agent
+    from ma_engine.research import agent
     class NoModel:
         totals = {}
         async def chat(self, *args, **kwargs):
@@ -113,7 +115,8 @@ def test_comparison_cannot_silently_substitute_saved_target():
 
 
 def test_user_comparison_value_has_explicit_provenance_not_arbitrary_number_permission(buyer_run):
-    from ma_engine import agent, guardrails
+    from ma_engine.research import agent
+    from ma_engine.validation import guardrails
     ctx, data = saved_context(buyer_run, "Compare the target's $350M EV with each buyer")
     scenario = ctx['requested_comparison']
     assert scenario['ev_mm']['display'] == '$350.0M'
@@ -125,7 +128,8 @@ def test_user_comparison_value_has_explicit_provenance_not_arbitrary_number_perm
 
 
 def test_long_followup_is_accepted_without_dropping_claims_and_still_checks_sources(buyer_run):
-    from ma_engine import agent, guardrails
+    from ma_engine.research import agent
+    from ma_engine.validation import guardrails
     from ma_engine.clients.llm_client import _parse
     import json
     payload = {'statements': [

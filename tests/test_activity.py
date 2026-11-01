@@ -15,8 +15,9 @@ import pytest
 from test_agent import (ENTRIES, TARGET, FakeLLM, StubOpenAI, committee_policy, research_round,
                         results)
 
-from ma_engine import agent, config, engine
-from ma_engine.agent import RequestError, research_buyer
+from ma_engine.research import agent, engine
+from ma_engine import config
+from ma_engine.research.agent import RequestError, research_buyer
 from ma_engine.clients.llm_client import LLMClient, LLMResult, _parse
 from ma_engine.clients.mcp_client import MCPClient
 from ma_engine.mcp_server import tools
@@ -505,7 +506,7 @@ def test_run_followup_opens_one_session_and_saves(buyer_run, monkeypatch):
 
 
 def test_stage_groups_partition_events_and_keep_housekeeping():
-    from ma_engine.ui_trace import stage_groups
+    from ma_engine.ui.activity import stage_groups
     events = [
         {"step": 1, "category": "mcp_tool", "name": "rank_acquirers", "status": "running"},
         {"step": 1, "category": "mcp_tool", "name": "rank_acquirers", "status": "completed"},
@@ -523,7 +524,7 @@ def test_stage_groups_partition_events_and_keep_housekeeping():
 
 
 def test_stage_result_distinguishes_repaired_checks_from_unresolved():
-    from ma_engine.ui_trace import stage_result
+    from ma_engine.ui.activity import stage_result
     events = [
         {"category": "validation", "acquirer_key": "example", "output": ["bad citation"]},
         {"category": "validation", "acquirer_key": "example", "output": []},
@@ -568,8 +569,8 @@ def test_llm_timeout_stops_at_retry_limit(tmp_path, monkeypatch):
 
 
 def test_saved_run_context_handles_trace_counts_and_has_separate_provenance(buyer_run):
-    from ma_engine.followup_context import saved_context
-    from ma_engine.guardrails import build_answer_evidence, check_statements
+    from ma_engine.research.followup_context import saved_context
+    from ma_engine.validation.guardrails import build_answer_evidence, check_statements
     from ma_engine.models import Statement
     buyer_run['trace']['events'] = [{'step': 1, 'category': 'mcp_tool', 'name': 'get_acquirer_profile',
                                      'output_summary': {'source_ids': 25, 'rows': 1}}]
@@ -582,7 +583,7 @@ def test_saved_run_context_handles_trace_counts_and_has_separate_provenance(buye
 
 
 def test_followup_run_context_uses_actual_citation_and_previous_buyer(buyer_run):
-    from ma_engine.followup_context import saved_context
+    from ma_engine.research.followup_context import saved_context
     buyer_run['followups'] = [{'question': 'What is Blackstone doing?', 'statements': [], 'status': 'verified'}]
     context, result = saved_context(buyer_run, 'Show me the source for your median deal size.')
     assert context['requested_buyer_reports'][0]['display_name'] == 'Blackstone'

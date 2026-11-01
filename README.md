@@ -63,7 +63,7 @@ From the project folder, after creating and configuring `.env`:
 
 ```bash
 uv sync
-uv run python -m ma_engine.prepare
+uv run python -m ma_engine.data.prepare
 uv run streamlit run src/ma_engine/app.py
 ```
 

@@ -24,13 +24,13 @@ Python 3.12, `uv` for dependencies, `pytest` for tests.
 data/raw/                  original CSV, never modified
 data/processed/            cleaned data and every pre-calculated table
 src/ma_engine/config.py    the only file that reads environment variables
-src/ma_engine/prepare.py   cleaning + pre-calculation (all target-independent math)
-src/ma_engine/ranking.py   target-dependent scoring (Python only)
+src/ma_engine/data/prepare.py   cleaning + pre-calculation (all target-independent math)
+src/ma_engine/data/ranking.py   target-dependent scoring (Python only)
 src/ma_engine/mcp_server/  FastMCP server (thin) and tool functions (lookups only)
 src/ma_engine/clients/     data, MCP, and LLM clients (one of each, reused)
-src/ma_engine/agent.py     the tool-calling research and writing loop
-src/ma_engine/guardrails.py report checks: citations, numbers, wording
-src/ma_engine/engine.py    run_engine(target): the full pipeline
+src/ma_engine/research/agent.py     the tool-calling research and writing loop
+src/ma_engine/validation/guardrails.py report checks: citations, numbers, wording
+src/ma_engine/research/engine.py    run_engine(target): the full pipeline
 src/ma_engine/prompts/     prompt text files
 src/ma_engine/app.py       Streamlit interface
 tests/                     pytest tests

@@ -4,7 +4,7 @@ setup:
 	uv sync
 
 data:
-	uv run python -m ma_engine.prepare
+	uv run python -m ma_engine.data.prepare
 
 mcp:
 	uv run python -m ma_engine.mcp_server.server
@@ -32,4 +32,4 @@ test:
 	uv run pytest
 
 check:
-	uv run python -m ma_engine.guardrails
+	uv run python -m ma_engine.validation.guardrails

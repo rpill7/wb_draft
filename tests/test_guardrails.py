@@ -4,9 +4,11 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from ma_engine import config, guardrails, ranking
+from ma_engine import config
+from ma_engine.validation import guardrails
+from ma_engine.data import ranking
 from ma_engine.clients.data_client import comps_stat_id
-from ma_engine.guardrails import ID_PATTERN, build_evidence, check, number_tokens
+from ma_engine.validation.guardrails import ID_PATTERN, build_evidence, check, number_tokens
 from ma_engine.mcp_server import tools
 from ma_engine.models import BuyerReport, ReportDraft
 

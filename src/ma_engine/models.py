@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ma_engine.config import DEFAULT_TARGET
-from ma_engine.prepare import KNOWN_VALUES, SECTORS
+from ma_engine.data.prepare import KNOWN_VALUES, SECTORS
 
 ANY_REGION = "Any region"
 GEOGRAPHIES = [*KNOWN_VALUES["geography"], ANY_REGION]

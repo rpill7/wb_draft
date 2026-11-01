@@ -1,6 +1,6 @@
 """Clean the raw transaction CSV and pre-calculate every target-independent table.
 
-Run with `make data` (`python -m ma_engine.prepare`). Functions take DataFrames so they
+Run with `make data` (`python -m ma_engine.data.prepare`). Functions take DataFrames so they
 can be tested; `write_outputs` and `main` do the file I/O.
 """
 

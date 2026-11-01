@@ -103,12 +103,13 @@ from datetime import datetime, timezone
 
 from pydantic import ValidationError, create_model
 
-from ma_engine import config, guardrails
+from ma_engine import config
+from ma_engine.validation import guardrails
 from ma_engine.clients.llm_client import scrub_secret, _public_error
 from ma_engine.app_logging import log_event
 from ma_engine.models import (ANY_REGION, GEOGRAPHIES, OWNERSHIPS, BuyerReport, FollowupAnswer,
                               FollowupResult, ReportDraft, RequestFields, Target)
-from ma_engine.prepare import KNOWN_VALUES, SECTORS
+from ma_engine.data.prepare import KNOWN_VALUES, SECTORS
 
 ENGINE_ONLY_TOOLS = {"rank_acquirers"}
 # Output caps for this module. Research stays short; the report itself may be longer.
@@ -689,10 +690,10 @@ async def answer_followup(question: str, run: dict, llm, mcp, use_cache: bool = 
     trace = {"question": question, "acquirer_key": None, "display_name": FOLLOWUP, "rounds": 0,
              "stop_reason": None, "tool_calls": [], "llm_calls": []}
     steps = Steps()
-    from ma_engine.followup_context import saved_context, check_answer_scope
+    from ma_engine.research.followup_context import saved_context, check_answer_scope
     context, saved_evidence = saved_context(run, question)
     answer_target = {**target, "requested_comparison": context["requested_comparison"]} if context.get("requested_comparison") else target
-    from ma_engine.followup_actions import saved_action
+    from ma_engine.research.followup_actions import saved_action
     action = saved_action(question, context, entries)
     if action is not None:
         evidence = guardrails.build_answer_evidence(answer_target, entries, [{"result": saved_evidence}])

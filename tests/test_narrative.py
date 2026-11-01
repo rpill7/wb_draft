@@ -9,7 +9,8 @@ import json
 
 import pytest
 
-from ma_engine import agent, guardrails
+from ma_engine.research import agent
+from ma_engine.validation import guardrails
 from ma_engine.clients.data_client import comps_stat_id, get_client, rank_stat_id
 from ma_engine.clients.llm_client import json_was_cut_off
 from ma_engine.mcp_server import tools
@@ -319,7 +320,7 @@ def test_count_citations_list_exact_contributors():
 
 
 def test_legacy_count_citation_does_not_claim_exact_evidence():
-    from ma_engine.ui_report import stat_view_html
+    from ma_engine.ui.reports import stat_view_html
     html = stat_view_html({"calculation": "count of closed deals", "n": 2,
                            "display": "2", "source_ids": ["A", "B", "C"]}, {})
     assert "broader evidence" in html and "Evidence records (3)" in html
@@ -335,7 +336,7 @@ def test_adjacent_only_claim_rejected_when_direct_deals_exist():
 
 
 def test_summary_preserves_rank_when_second_report_is_not_verified():
-    from ma_engine.ui_report import executive_summary_html
+    from ma_engine.ui.reports import executive_summary_html
     from ma_engine.models import BuyerReport, Target
     ranking = tools.rank_acquirers()["data"]
     reports = [BuyerReport.from_ranking(entry, make(entry).draft)
@@ -353,7 +354,7 @@ def test_summary_preserves_rank_when_second_report_is_not_verified():
 
 
 def test_deal_preview_keeps_risk_evidence_and_missing_values_explicit():
-    from ma_engine.ui_report import deal_view_html
+    from ma_engine.ui.reports import deal_view_html
     html = deal_view_html({"target_company": "<Example>", "num_bidders": 3,
                            "days_to_close": 101, "financing_type": "All cash"})
     assert "&lt;Example&gt;" in html and "<Example>" not in html

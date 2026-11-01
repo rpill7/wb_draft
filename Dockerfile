@@ -26,7 +26,7 @@ COPY src ./src
 COPY .streamlit/config.toml ./.streamlit/config.toml
 COPY data/raw ./data/raw
 RUN uv sync --frozen --no-dev \
-    && python -m ma_engine.prepare
+    && python -m ma_engine.data.prepare
 
 # Run as a non-root user that can write only run outputs and the LLM cache.
 RUN useradd --create-home --uid 1000 app \

@@ -1,6 +1,8 @@
 import asyncio
 import pytest
-from ma_engine import config, engine, submissions
+from ma_engine import config
+from ma_engine.research import engine
+from ma_engine.persistence import submissions
 
 
 def test_requests_survive_new_reads_and_completion_hides_only_finished(tmp_path, monkeypatch):
