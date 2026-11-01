@@ -76,7 +76,9 @@ def test_closed_deals_count_and_pending_do_not():
     rows += [deal("P-1", "pending only", outcome="Pending")]
     buyers = by_key(ranked(rows))
     assert set(buyers) == {"alpha", "gamma"}
-    assert buyers["alpha"]["score"] == buyers["gamma"]["score"]
+    alpha_score = {k: v for k, v in buyers["alpha"]["score"].items() if k != "stat_id"}
+    gamma_score = {k: v for k, v in buyers["gamma"]["score"].items() if k != "stat_id"}
+    assert alpha_score == gamma_score
     assert buyers["gamma"]["weak_signal_ids"] == ["G-P0", "G-P1"]
     assert buyers["gamma"]["supporting_closed_ids"] == ["G-1", "G-2"]
     assert any("did not close" in w for w in buyers["gamma"]["warnings"])
@@ -221,9 +223,9 @@ def test_no_buyer_names_in_ranking_code():
     assert not [name for name in names if name in source]
 
 
-def test_all_conviction_levels_in_default_top_10(default_result):
+def test_default_shortlist_is_score_order(default_result):
     top = default_result["data"]["buyers"][:REPORT_COUNT]
-    assert {b["starting_conviction"]["level"] for b in top} == {"High", "Medium", "Low"}
+    assert [b["score_rank"] for b in top] == list(range(1, REPORT_COUNT + 1))
 
 
 def test_conviction_follows_percentile_bars_and_near_size_rule(default_result):
@@ -259,13 +261,20 @@ def test_rank_and_score_rank_are_consistent(default_result):
         assert (buyer["selection_note"] is not None) == moved
 
 
-def test_default_promotions_have_direct_deals_and_reserves_hold_both_types(default_result):
+def test_default_has_no_type_promotions_and_separate_strategic_alternatives(default_result):
     data = default_result["data"]
-    buyers = by_key(data["buyers"])
-    assert data["promoted_keys"]
-    assert all(buyers[k]["direct_closed_count"]["value"] > 0 for k in data["promoted_keys"])
-    reserves = data["buyers"][REPORT_COUNT:]
-    assert {b["acquirer_type"] for b in reserves} == set(ranking.BUYER_TYPES)
+    assert data["selection_policy"] == "score_order"
+    assert not data["promoted_keys"] and not data["displaced_keys"]
+    selected = {b["acquirer_key"] for b in data["buyers"][:REPORT_COUNT]}
+    alternatives = data["strategic_alternatives"]
+    assert alternatives and all(b["acquirer_key"] not in selected for b in alternatives)
+    assert [b["score_rank"] for b in alternatives] == sorted(b["score_rank"] for b in alternatives)
+
+
+@pytest.fixture
+def balanced_policy(monkeypatch):
+    """The retained coverage algorithm is only a sensitivity scenario."""
+    monkeypatch.setattr(ranking, "MIN_PER_TYPE", 3)
 
 
 def test_conviction_reason_uses_three_decimals(default_result):
@@ -292,7 +301,7 @@ def type_pool(sponsors: int, strategics: int, strategic_size: float = 2000.0):
     return rows
 
 
-def test_missing_type_is_promoted_into_top_10_with_fallback_warning():
+def test_missing_type_is_promoted_into_top_10_with_fallback_warning(balanced_policy):
     result = ranking.rank_acquirers(TARGET, client=fake_client(type_pool(12, 4)))
     data, buyers = result["data"], result["data"]["buyers"]
     head = buyers[:REPORT_COUNT]
@@ -313,7 +322,7 @@ def test_missing_type_is_promoted_into_top_10_with_fallback_warning():
             "Strategic 1, Strategic 2.") in result["warnings"]
 
 
-def test_coverage_prefers_strategic_with_a_direct_deal():
+def test_coverage_prefers_strategic_with_a_direct_deal(balanced_policy):
     rows = type_pool(12, 4) + [deal("T9-1", "strategic direct", size=5000.0, year=2012,
                                     buyer_type="Strategic", ownership="Public",
                                     geography="National", margin="below", tags=())]
@@ -327,7 +336,7 @@ def test_coverage_prefers_strategic_with_a_direct_deal():
                for w in result["warnings"])
 
 
-def test_no_fallback_warning_when_direct_strategics_suffice():
+def test_no_fallback_warning_when_direct_strategics_suffice(balanced_policy):
     rows = type_pool(12, 0)
     rows += [deal(f"T{i}-1", f"strategic {i}", size=3000.0, buyer_type="Strategic")
              for i in range(3)]
@@ -336,7 +345,7 @@ def test_no_fallback_warning_when_direct_strategics_suffice():
     assert not any("Not enough" in w for w in result["warnings"])
 
 
-def test_reserves_hold_both_types_when_available():
+def test_reserves_hold_both_types_when_available(balanced_policy):
     result = ranking.rank_acquirers(TARGET, client=fake_client(type_pool(12, 4)))
     data, buyers = result["data"], result["data"]["buyers"]
     reserves = buyers[REPORT_COUNT:]
@@ -365,7 +374,7 @@ def test_no_promotion_when_both_types_are_covered():
     assert all(b["selection_note"] is None for b in data["buyers"])
 
 
-def test_no_promotion_when_pool_lacks_the_type():
+def test_no_promotion_when_pool_lacks_the_type(balanced_policy):
     result = ranking.rank_acquirers(TARGET, client=fake_client(type_pool(12, 0)))
     assert result["data"]["promoted_keys"] == []
     assert any("Strategic" in w and "cannot be met" in w for w in result["warnings"])

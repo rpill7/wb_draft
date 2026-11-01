@@ -8,7 +8,7 @@ are never re-derived; deals that did not close add nothing to the score.
 
 Run `python -m ma_engine.ranking` to rank the default target and print a diagnostic table, or
 `python -m ma_engine.ranking --sensitivity` for the top 10 under alternative weights, adjacency
-thresholds, no small-sample prior and no coverage rule (`--sector` and `--ev` change the target).
+thresholds, no small-sample prior and balanced buyer-type coverage (`--sector` and `--ev` change the target).
 """
 
 import argparse
@@ -19,7 +19,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-from ma_engine.clients.data_client import get_client
+from ma_engine.clients.data_client import get_client, rank_stat_id
 from ma_engine.config import DEFAULT_TARGET, REPORT_COUNT, SHORTLIST_SIZE
 from ma_engine.models import ANY_REGION, Target
 from ma_engine.prepare import fmt_money, normalize_acquirer, round_half_up, size_band
@@ -62,17 +62,9 @@ CONVICTION_RULE = (
     f"{SIZE_WINDOW:g}x of the target EV. Low: everything else."
 )
 
-MIN_PER_TYPE = 3
+MIN_PER_TYPE = 0  # Score order is the production policy; coverage is a sensitivity case.
 BUYER_TYPES = ("Financial Sponsor", "Strategic")
-COVERAGE_RULE = (
-    f"The first {REPORT_COUNT} positions hold at least {MIN_PER_TYPE} buyers of each type "
-    f"({' and '.join(BUYER_TYPES)}) when the candidate pool has them. Missing-type buyers with "
-    "at least one closed deal in the target sector are promoted first, best score first; only "
-    "if none are left are other buyers of that type promoted, with a warning. Promoted buyers "
-    "displace the lowest-scoring buyers of the other type, which move down the shortlist. The "
-    f"reserve places after the first {REPORT_COUNT} hold at least one buyer of each type when "
-    "the pool has one, so a failed buyer can be replaced by a buyer of the same type."
-)
+COVERAGE_RULE = "Score order only; buyer type does not reserve places in the shortlist."
 
 
 def _two_places(value: float) -> str:
@@ -294,6 +286,8 @@ def _score_buyer(key: str, deals: pd.DataFrame, target: Target, profile: dict,
         _signal("rationale_fit", *_rationale_fit(closed, target)),
     ]
     score = sum(s.pop("_raw") for s in signals)
+    for signal in signals:
+        signal["stat_id"] = rank_stat_id(key, signal["name"])
     near = int((_size_distance(closed, target) <= math.log(SIZE_WINDOW)).sum())
     direct = int((closed["sector"] == target.sector).sum())
     return {
@@ -303,10 +297,23 @@ def _score_buyer(key: str, deals: pd.DataFrame, target: Target, profile: dict,
         "acquirer_key": key,
         "display_name": profile["display_name"],
         "acquirer_type": profile["acquirer_type"],
-        "score": {"value": round_half_up(score, 4), "display": _two_places(score)},
-        "relevant_closed_count": {"value": len(closed), "display": str(len(closed))},
-        "direct_closed_count": {"value": direct, "display": str(direct)},
-        "near_size_closed_count": {"value": near, "display": str(near)},
+        "score": {"value": round_half_up(score, 4), "display": _two_places(score),
+                  "stat_id": rank_stat_id(key, "score")},
+        "relevant_closed_count": {
+            "value": len(closed), "display": str(len(closed)),
+            "stat_id": rank_stat_id(key, "relevant_closed_count"),
+            "calculation": "count of relevant closed deals", "source_ids": _ids(closed)},
+        "direct_closed_count": {
+            "value": direct, "display": str(direct),
+            "stat_id": rank_stat_id(key, "direct_closed_count"),
+            "calculation": f"count of closed deals in {target.sector}",
+            "source_ids": _ids(closed[closed["sector"] == target.sector])},
+        "near_size_closed_count": {
+            "value": near, "display": str(near),
+            "stat_id": rank_stat_id(key, "near_size_closed_count"),
+            "calculation": (f"count of relevant closed deals within {SIZE_WINDOW:g}x of the "
+                            "target enterprise value"),
+            "source_ids": _ids(closed[_size_distance(closed, target) <= math.log(SIZE_WINDOW)])},
         "signals": signals,
         "starting_conviction": None,
         "supporting_closed_ids": _ids(closed),
@@ -398,6 +405,9 @@ def apply_type_coverage(ranked: list[dict], limit: int,
     `sector` are promoted first. Returns the shortlist (`limit` long), the promoted, displaced
     and reserve-added keys, and warnings when the pool lacks a type or the guard falls back.
     """
+    if MIN_PER_TYPE == 0:
+        return ranked[:limit], {"promoted_keys": [], "displaced_keys": [],
+                               "reserve_added_keys": []}, []
     head_size = min(REPORT_COUNT, limit)
     head, rest = ranked[:head_size], ranked[head_size:]
     promoted, displaced, warnings = [], [], []
@@ -501,12 +511,24 @@ def rank_acquirers(target: Target, limit: int = SHORTLIST_SIZE, excluded_keys=()
         "weights": WEIGHTS,
         "conviction_rule": CONVICTION_RULE,
         "conviction_thresholds": conviction_thresholds(candidates) if candidates else None,
-        "coverage_rule": COVERAGE_RULE,
+        "coverage_rule": (COVERAGE_RULE if MIN_PER_TYPE == 0 else
+                          f"Sensitivity case: at least {MIN_PER_TYPE} buyers of each type."),
+        "selection_policy": "score_order" if MIN_PER_TYPE == 0 else "type_coverage",
+        "strategic_alternatives": [
+            {"acquirer_key": b["acquirer_key"], "display_name": b["display_name"],
+             "score_rank": b["score_rank"], "score": b["score"],
+             "direct_closed_count": b["direct_closed_count"],
+             "near_size_closed_count": b["near_size_closed_count"]}
+            for b in kept if b["acquirer_type"] == "Strategic"
+            and b not in buyers[:REPORT_COUNT]][:3],
         **coverage,
         "buyers": buyers,
     }
     source_ids = sorted({i for b in buyers for i in b["supporting_closed_ids"] + b["weak_signal_ids"]})
-    return {"data": data, "source_ids": source_ids, "warnings": warnings}
+    result = {"data": data, "source_ids": source_ids, "warnings": warnings}
+    if hasattr(client, "note_ranking"):
+        client.note_ranking(data)
+    return result
 
 
 # ---------- sensitivity ----------
@@ -529,7 +551,7 @@ def _variants(client) -> list[tuple[str, dict, object]]:
             *[(f"drop {name}", {"WEIGHTS": renormalised(name)}, client) for name in WEIGHTS],
             *[(f"adjacency {t:g}", {}, adjacency(t)) for t in (0.5, 0.75)],
             ("prior off", {"PRIOR_DEALS": 0}, client),
-            ("coverage rule off", {"MIN_PER_TYPE": 0}, client)]
+            ("balanced buyer types", {"MIN_PER_TYPE": 3}, client)]
 
 
 def sensitivity(target: Target, client=None) -> list[dict]:
@@ -619,3 +641,21 @@ if __name__ == "__main__":
     args = parser.parse_args()
     chosen = Target(**{**DEFAULT_TARGET, "sector": args.sector, "ev_mm": args.ev})
     print_sensitivity(chosen) if args.sensitivity else main(chosen)
+
+
+def evidence_review(entries: list[dict]) -> dict:
+    """Describe shortlist evidence breadth using existing target-dependent counts.
+
+    These are separate dimensions, not a new composite strength score. No report
+    verification status contributes to historical acquisition fit.
+    """
+    if not entries:
+        return {}
+    dimensions = {"fewest_relevant": "relevant_closed_count", "fewest_direct": "direct_closed_count",
+                  "fewest_near_size": "near_size_closed_count"}
+    groups = {label: [e["display_name"] for e in entries
+                      if e[field]["value"] == min(b[field]["value"] for b in entries)]
+              for label, field in dimensions.items()}
+    groups["mainly_adjacent"] = [e["display_name"] for e in entries
+                                 if e["relevant_closed_count"]["value"] > 2 * e["direct_closed_count"]["value"]]
+    return groups

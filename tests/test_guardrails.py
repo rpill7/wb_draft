@@ -4,13 +4,16 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from ma_engine import config, guardrails
+from ma_engine import config, guardrails, ranking
+from ma_engine.clients.data_client import comps_stat_id
 from ma_engine.guardrails import ID_PATTERN, build_evidence, check, number_tokens
 from ma_engine.mcp_server import tools
 from ma_engine.models import BuyerReport, ReportDraft
 
 HCS = "Healthcare Services"
 MID = "$100M–$400M"
+EBITDA_ONLY = comps_stat_id(HCS, "sector_only", MID, "ev_ebitda", "median")
+EBITDA_PLUS = comps_stat_id(HCS, "sector_plus_adjacent", MID, "ev_ebitda", "median")
 CALLS = [
     ("get_acquirer_profile", {"acquirer_key": "blackstone"}),
     ("get_acquirer_deals", {"acquirer_key": "blackstone", "closed_only": False, "limit": 25}),
@@ -25,6 +28,8 @@ def fact(text, *ids):
 
 
 VALID = {
+    "summary": fact("Blackstone has closed Healthcare Services precedents near the target size, "
+                    "including Evergreen Care Solutions.", "MA-2021-0195"),
     "acquirer_overview": [
         fact("Blackstone is a Financial Sponsor with 25 deals in the dataset, 22 of them closed.",
              "MA-2021-0195", "MA-2021-0407"),
@@ -47,8 +52,9 @@ VALID = {
     ],
     "valuation_context": [
         fact("Closed Healthcare Services deals of $100M–$400M had a median EV/EBITDA of 12.1x "
-             "(n=10).", "MA-2021-0195", "MA-2021-0407"),
-        fact("Adding adjacent sectors, the median EV/EBITDA is 12.4x (n=75).", "MA-2018-0122"),
+             "(n=10).", EBITDA_ONLY, "MA-2021-0195", "MA-2021-0407"),
+        fact("Adding adjacent sectors, the median EV/EBITDA is 12.4x (n=75).", EBITDA_PLUS,
+             "MA-2018-0122"),
     ],
     "risk_flags": [
         {"risk": "Deals that did not close", "explanation": "MA-2020-0040 was Withdrawn and "
@@ -104,8 +110,9 @@ def test_draft_schema_is_flat_and_closed():
     schema = ReportDraft.model_json_schema()
     text = json.dumps(schema)
     assert "anyOf" not in text and "oneOf" not in text
-    assert set(schema["properties"]) == {"acquirer_overview", "strategic_fit", "precedent_activity",
-                                         "valuation_context", "risk_flags", "conviction"}
+    assert set(schema["properties"]) == {"summary", "acquirer_overview", "strategic_fit",
+                                         "precedent_activity", "valuation_context", "risk_flags",
+                                         "conviction"}
     assert schema["additionalProperties"] is False
     assert schema["properties"]["risk_flags"]["maxItems"] == 4
 
@@ -334,7 +341,8 @@ def test_valuation_interpretation_needs_sample_size(entry, evidence):
     def edit(d):
         d["valuation_context"].append({"text": "Blackstone's 17.2x median paid sits beside the "
                                                "12.1x comps median.", "kind": "interpretation",
-                                       "source_ids": ["MA-2021-0195"]})
+                                       "source_ids": ["ST-PROFILE-blackstone-closed-ev-ebitda-median",
+                                                      EBITDA_ONLY, "MA-2021-0195"]})
     assert_one_issue(issues_for(entry, evidence, edit),
                      "valuation_context[2]: valuation interpretation has no sample size")
 
@@ -351,7 +359,7 @@ def test_valuation_sample_size_not_in_evidence(entry, evidence):
     def edit(d):
         d["valuation_context"][1]["text"] = d["valuation_context"][1]["text"].replace("n=75", "n=77")
     assert_one_issue(issues_for(entry, evidence, edit),
-                     "valuation_context[1]: n=77 is not the sample size", "12.4x has n=75")
+                     "valuation_context[1]: n=77 is not the sample size", "has n=75")
 
 
 # ---------- claim-to-source binding (review swapped sentences) ----------
@@ -414,7 +422,7 @@ def test_sample_size_of_another_comp_set(entry, evidence):
     def edit(d):
         d["valuation_context"][1]["text"] = "Adding adjacent sectors, the median EV/EBITDA is 12.4x (n=10)."
     assert_one_issue(issues_for(entry, evidence, edit),
-                     "valuation_context[1]: n=10 is not the sample size", "12.4x has n=75")
+                     "valuation_context[1]: n=10 is not the sample size", "has n=75")
 
 
 def test_other_buyers_comp_id_as_precedent(entry, evidence):
@@ -436,8 +444,8 @@ def test_fit_resting_only_on_comp_ids(entry, evidence):
 def test_comps_figure_in_precedent(entry, evidence):
     issues = issues_for(entry, evidence, replace_precedent(
         "Blackstone acquired Evergreen Care Solutions at 12.1x.", "MA-2021-0195"))
-    assert_one_issue(issues, '"12.1x" is a comps or other-buyer figure',
-                     "MA-2021-0195 ($299.0M, EV/EBITDA 14.6x")
+    assert_one_issue(issues, "Cite ST-COMPS-healthcare-services-sector_only-100-400-ev_ebitda-median "
+                     "for 12.1x")
 
 
 def test_statistic_number_needs_one_of_its_ids(entry, evidence):
@@ -445,7 +453,7 @@ def test_statistic_number_needs_one_of_its_ids(entry, evidence):
     issues = issues_for(entry, evidence,
                         lambda d: d["valuation_context"][0].update(source_ids=["MA-2018-0122"]))
     assert len(issues) == 2, issues
-    assert 'valuation_context[0]: "12.1x" comes from a statistic over 10 deals' in issues[0]
+    assert "Cite ST-COMPS-healthcare-services-sector_only-100-400-ev_ebitda-median for 12.1x" in issues[0]
     assert "valuation_context[0]: n=10 is not the sample size" in issues[1]
 
 
@@ -484,6 +492,9 @@ def realistic_draft(entry, target, results) -> dict:
     e1, e2 = only["ev_ebitda"], plus["ev_ebitda"]
     non_closed = [r for r in all_rows["deals"] if not r["is_closed"]][:2]
     return {
+        "summary": fact(f"{name} has closed deals in or next to {target['sector']} near the "
+                        f"target's {target['ev_mm']['display']}.",
+                        entry["supporting_closed_ids"][0]),
         "acquirer_overview": [
             fact(f"{name} is a {p['acquirer_type']} with {p['deal_count']['display']} deals in the "
                  f"dataset, {p['closed_count']['display']} of them closed.",
@@ -493,7 +504,9 @@ def realistic_draft(entry, target, results) -> dict:
                  *[v["source_ids"][0] for _, v in sectors]),
             fact(f"Its median closed deal size is {size['median']['display']} (n="
                  f"{size['median']['n']}), from {size['smallest']['display']} to "
-                 f"{size['largest']['display']}.", *size["median"]["source_ids"]),
+                 f"{size['largest']['display']}.", size["median"]["stat_id"],
+                 size["smallest"]["stat_id"], size["largest"]["stat_id"],
+                 *size["median"]["source_ids"]),
             fact(f"Its deals run from {p['first_deal_year']['display']} to "
                  f"{p['last_deal_year']['display']}.", *p["first_deal_year"]["source_ids"],
                  *p["last_deal_year"]["source_ids"]),
@@ -515,14 +528,17 @@ def realistic_draft(entry, target, results) -> dict:
                   r["transaction_id"]) for r in non_closed],
         "valuation_context": [
             fact(f"Closed {target['sector']} deals of {band} had a median EV/EBITDA of "
-                 f"{e1['median']['display']} (n={e1['sample_size']['display']}).", *e1["source_ids"]),
+                 f"{e1['median']['display']} (n={e1['sample_size']['display']}).",
+                 e1["median"]["stat_id"], *e1["source_ids"]),
             fact(f"Adding adjacent sectors, EV/EBITDA runs {e2['p25']['display']} to "
                  f"{e2['p75']['display']}, median {e2['median']['display']} "
-                 f"(n={e2['sample_size']['display']}).", *e2["source_ids"]),
+                 f"(n={e2['sample_size']['display']}).", e2["p25"]["stat_id"], e2["median"]["stat_id"],
+                 e2["p75"]["stat_id"], *e2["source_ids"]),
             {"text": f"{name} paid a median {p['closed_ev_ebitda_median']['display']} (n="
                      f"{p['closed_ev_ebitda_median']['n']}), beside the {e1['median']['display']} "
                      f"comps median (n={e1['sample_size']['display']}).", "kind": "interpretation",
-             "source_ids": p["closed_ev_ebitda_median"]["source_ids"][:2] + e1["source_ids"][:1]},
+             "source_ids": [p["closed_ev_ebitda_median"]["stat_id"], e1["median"]["stat_id"],
+                            *p["closed_ev_ebitda_median"]["source_ids"][:2]]},
         ],
         "risk_flags": [
             {"risk": "Competitive processes", "explanation": "Its closed deals had a median of "
@@ -530,7 +546,8 @@ def realistic_draft(entry, target, results) -> dict:
              "kind": "fact", "source_ids": p["closed_count"]["source_ids"]},
             {"risk": "Size mismatch", "explanation": f"Its median closed deal of "
              f"{size['median']['display']} compares with the target's {target['ev_mm']['display']}.",
-             "kind": "interpretation", "source_ids": size["median"]["source_ids"][:2]},
+             "kind": "interpretation", "source_ids": [size["median"]["stat_id"],
+                                                    *size["median"]["source_ids"][:2]]},
         ],
         "conviction": {"level": entry["starting_conviction"]["level"],
                        "reason": entry["starting_conviction"]["reason"].split(". ")[0] + ".",
@@ -541,7 +558,7 @@ def realistic_draft(entry, target, results) -> dict:
 @pytest.mark.parametrize("key", ["blackstone", "atrium health", "vns health"])
 def test_realistic_correct_report_passes(key):
     ranked = tools.rank_acquirers()["data"]
-    target, entry = ranked["target"], next(b for b in ranked["buyers"] if b["acquirer_key"] == key)
+    target, entry = ranked["target"], next(b for b in ranking.rank_acquirers(ranking.Target.default(), limit=100)["data"]["buyers"] if b["acquirer_key"] == key)
     sectors = [s["sector"] for s in target["relevant_sectors"]]
     calls = [("get_acquirer_profile", {"acquirer_key": key}),
              ("get_valuation_comps", {"sector": HCS, "scope": "sector_only", "size_band": MID}),
@@ -605,7 +622,9 @@ def all_cited(report: BuyerReport) -> set[str]:
 def test_render_shows_exactly_the_cited_ids(entry, evidence):
     report = guardrails.apply_check(make(entry), evidence)
     md = guardrails.render_markdown(report)
-    assert set(ID_PATTERN.findall(md)) == all_cited(report)
+    cited = all_cited(report)
+    assert set(ID_PATTERN.findall(md)) == {i for i in cited if i.startswith("MA-")}
+    assert all(f"[{i}]" in md for i in cited)
     assert "[MA-2023-0456]" in md and "*Interpretation:*" in md and "*Unknown:*" in md
     assert "Not verified" not in md
     titles = ["Acquirer Overview", "Strategic Fit Thesis", "Precedent Activity",

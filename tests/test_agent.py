@@ -15,7 +15,7 @@ import pytest
 from openai.types import Model
 from openai.types.chat import ChatCompletion
 
-from ma_engine import agent, config, engine, guardrails, ranking
+from ma_engine import agent, config, engine, guardrails
 from ma_engine.agent import ReportError, agent_tools, research_buyer
 from ma_engine.clients.llm_client import (EMPTY_SUPPORTED_WARNING, OPTIONAL_PARAMETERS, LLMClient,
                                           LLMResult, _parse)
@@ -97,7 +97,10 @@ def good_draft(messages) -> dict:
     deal = deals[0]
     size = next(s for s in entry["signals"] if s["name"] == "size_fit")
     name, start = entry["display_name"], entry["starting_conviction"]
+    median = comps["ev_ebitda"]["median"]
     return {
+        "summary": fact(f"{name} has closed deals near the target's size.",
+                        entry["supporting_closed_ids"][0]),
         "acquirer_overview": [fact(
             f"{name} is a {profile['acquirer_type']} with {profile['deal_count']['display']} deals "
             f"in the dataset, {profile['closed_count']['display']} of them closed.",
@@ -113,9 +116,8 @@ def good_draft(messages) -> dict:
             deal["transaction_id"])],
         "valuation_context": [fact(
             f"Closed {comps['sector']} deals of {comps['size_band']} had a median EV/EBITDA of "
-            f"{comps['ev_ebitda']['median']['display']} "
-            f"(n={comps['ev_ebitda']['sample_size']['display']}).",
-            *comps["ev_ebitda"]["source_ids"][:3])],
+            f"{median['display']} (n={comps['ev_ebitda']['sample_size']['display']}).",
+            median["stat_id"])],
         "risk_flags": [
             {"risk": "Competitive process", "explanation": f"{deal['target_company']} drew "
              f"{deal['num_bidders']['display']} bidders.", "kind": "fact",
@@ -160,9 +162,10 @@ class FakeLLM:
         return {"max_tokens"}
 
     async def chat(self, messages, tools=None, tool_choice=None, response_schema=None,
-                   use_cache=True) -> LLMResult:
+                   use_cache=True, max_tokens=None) -> LLMResult:
         self.calls.append({"messages": list(messages), "tools": tools, "tool_choice": tool_choice,
-                           "schema": response_schema, "key": buyer_key(messages)})
+                           "schema": response_schema, "key": buyer_key(messages),
+                           "max_tokens": max_tokens})
         self.totals["calls"] += 1
         await asyncio.sleep(0)
         # Failing buyers fail at the write step, after research, so a partial trace exists.
@@ -174,8 +177,10 @@ class FakeLLM:
                 {"id": f"call_{len(self.calls)}_{i}", "name": name,
                  "arguments": args if isinstance(args, str) else json.dumps(args)}
                 for i, (name, args) in enumerate(calls)])
-        payload = (self.write(messages) if response_schema is ReportDraft
+        payload = (self.write(messages) if response_schema is ReportDraft or response_schema.__name__ == "ReportSectionRepair"
                    else self.committee(messages))
+        if response_schema.__name__ == "ReportSectionRepair" and isinstance(payload, dict):
+            payload = {k: v for k, v in payload.items() if k in response_schema.model_fields}
         content = payload if isinstance(payload, str) else json.dumps(payload)
         parsed, error = _parse(content, response_schema)
         return LLMResult(content=content, tool_calls=[], parsed=parsed, parse_error=error)
@@ -187,7 +192,8 @@ async def run_one(key, llm, transport=server):
 
 
 def tool_path(trace) -> list[tuple]:
-    return [(c["round"], c["tool"], c["arguments"].get("scope")) for c in trace["tool_calls"]]
+    """Tool calls as (round, name, scope). Sorted, because calls in one round finish in any order."""
+    return sorted((c["round"], c["tool"], c["arguments"].get("scope")) for c in trace["tool_calls"])
 
 
 # ---------- MCP client ----------
@@ -261,9 +267,10 @@ async def test_two_tool_paths_depend_on_evidence():
                                  (2, "get_acquirer_deals", None)]
     assert tool_path(thin) == [(1, "get_acquirer_profile", None),
                                (1, "get_valuation_comps", "sector_only"),
-                               (2, "get_valuation_comps", "sector_plus_adjacent"),
-                               (2, "get_acquirer_deals", None)]
-    assert thin["tool_calls"][3]["arguments"]["sectors"] == RELEVANT
+                               (2, "get_acquirer_deals", None),
+                               (2, "get_valuation_comps", "sector_plus_adjacent")]
+    deals = next(call for call in thin["tool_calls"] if call["tool"] == "get_acquirer_deals")
+    assert deals["arguments"]["sectors"] == RELEVANT
 
 
 @pytest.mark.anyio
@@ -411,7 +418,7 @@ def runs_dir(tmp_path, monkeypatch):
 
 @pytest.mark.anyio
 async def test_engine_full_run_saves_guardrails_shape(runs_dir, monkeypatch, capsys):
-    llm = FakeLLM(committee=committee_policy({"blackstone": "Medium", "atrium health": "High"}))
+    llm = FakeLLM(committee=committee_policy({"blackstone": "Medium", "nordic capital": "Low"}))
     created = []
 
     def make_mcp(log_file=None):
@@ -429,12 +436,13 @@ async def test_engine_full_run_saves_guardrails_shape(runs_dir, monkeypatch, cap
     assert [r.rank for r in reports] == list(range(1, config.REPORT_COUNT + 1))
     assert all(r.status == "verified" for r in reports), [r.issues for r in reports]
     levels = {r.acquirer_key: r.draft.conviction.level for r in reports}
-    assert levels["blackstone"] == "Medium" and levels["atrium health"] == "Low"
-    assert any(r["acquirer_key"] == "atrium health" for r in run["trace"]["committee"]["rejected"])
+    assert levels["blackstone"] == "Medium" and levels["nordic capital"] == "High"
+    assert any(r["acquirer_key"] == "nordic capital" for r in run["trace"]["committee"]["rejected"])
 
     run_dir = runs_dir / run["run_id"]
     saved = json.loads((run_dir / "reports.json").read_text())
-    assert set(saved) == {"run_id", "target", "reports"}
+    assert set(saved) == {"run_id", "target", "reports", "research_title"}
+    assert saved["research_title"] == "Healthcare Services buyer research"
     assert saved["target"] == config.DEFAULT_TARGET
     assert [BuyerReport.model_validate(r) for r in saved["reports"]] == reports
     assert (run_dir / "reports.md").read_text().startswith("# Buyer reports")
@@ -450,64 +458,27 @@ async def test_engine_full_run_saves_guardrails_shape(runs_dir, monkeypatch, cap
 
 
 @pytest.mark.anyio
-async def test_engine_substitutes_a_failed_buyer(runs_dir, monkeypatch):
+async def test_engine_keeps_a_failed_buyer_in_place(runs_dir, monkeypatch):
     llm = FakeLLM(committee=committee_policy({}), fail_keys={"gtcr"})
     monkeypatch.setattr(engine, "LLMClient", lambda: llm)
     monkeypatch.setattr(engine, "MCPClient", lambda log_file=None: MCPClient(transport=server))
     run = await engine.run_engine(config.DEFAULT_TARGET)
     reports = run["reports"]
     keys = [r.acquirer_key for r in reports]
-    shortlist = [b["acquirer_key"] for b in RANKING["buyers"]]
-    reserve = shortlist[config.REPORT_COUNT]
-    assert "gtcr" not in keys and keys[-1] == reserve
+    assert keys == [b["acquirer_key"] for b in RANKING["buyers"][:config.REPORT_COUNT]]
     assert [r.rank for r in reports] == list(range(1, config.REPORT_COUNT + 1))
-    assert reports[-1].score_rank == ENTRIES[reserve]["score_rank"]
-    assert reports[-1].selection_note == "Replaced GTCR after an error"
-    [sub] = run["trace"]["substitutions"]
-    assert sub["failed"] == "gtcr" and sub["replacement"] == reserve
-    assert sub["same_type_rule"] is False and "provider error" in sub["error"]
+    failed = next(r for r in reports if r.acquirer_key == "gtcr")
+    assert failed.status == "failed" and failed.draft is None
+    assert "provider error" in failed.error and failed.issues == [failed.error]
+    assert run["trace"]["substitutions"] == []
+    assert not any(r.selection_note and "Replaced" in r.selection_note for r in reports)
     [error] = json.loads((runs_dir / run["run_id"] / "trace.json").read_text())["errors"]
     assert error["acquirer_key"] == "gtcr" and "provider error" in error["error"]
     partial = error["partial_trace"]
     assert partial["acquirer_key"] == "gtcr" and partial["tool_calls"]
     assert [c["purpose"] for c in partial["llm_calls"]][0] == "research round 1"
-
-
-@pytest.mark.anyio
-async def test_engine_keeps_buyer_type_rule_when_substituting(runs_dir, monkeypatch):
-    monkeypatch.setattr(config, "SHORTLIST_SIZE", 20)
-    for entry in tools.rank_acquirers(limit=20)["data"]["buyers"]:
-        monkeypatch.setitem(ENTRIES, entry["acquirer_key"], entry)
-    llm = FakeLLM(committee=committee_policy({}), fail_keys={"atrium health"})
-    monkeypatch.setattr(engine, "LLMClient", lambda: llm)
-    monkeypatch.setattr(engine, "MCPClient", lambda log_file=None: MCPClient(transport=server))
-    run = await engine.run_engine(config.DEFAULT_TARGET)
-    shortlist = run["ranking"]["buyers"]
-    first_strategic = next(b for b in shortlist[config.REPORT_COUNT:]
-                           if b["acquirer_type"] == "Strategic")
-    assert shortlist[config.REPORT_COUNT]["acquirer_type"] == "Financial Sponsor"
-    [sub] = run["trace"]["substitutions"]
-    assert sub["replacement"] == first_strategic["acquirer_key"] and sub["same_type_rule"]
-    reports = run["reports"]
-    assert sum(r.acquirer_type == "Strategic" for r in reports) == ranking.MIN_PER_TYPE
-    assert [r.rank for r in reports] == list(range(1, config.REPORT_COUNT + 1))
-    assert reports[-1].selection_note == "Replaced Atrium Health after an error"
-
-
-def test_pick_reserve_falls_back_to_next_when_no_same_type():
-    def buyer(key, kind):
-        return {"acquirer_key": key, "display_name": key.upper(), "acquirer_type": kind, "rank": 0}
-
-    top = [buyer(f"s{i}", "Strategic") for i in range(3)] + [buyer("f0", "Financial Sponsor")]
-    reserves = [buyer("f1", "Financial Sponsor"), buyer("f2", "Financial Sponsor")]
-    pick, by_type = engine.pick_reserve(top[0], top, reserves)
-    assert (pick["acquirer_key"], by_type) == ("f1", False)
-    assert pick["selection_note"] == "Replaced S0 after an error"
-    reserves.append(buyer("s3", "Strategic"))
-    pick, by_type = engine.pick_reserve(top[1], top, reserves)
-    assert (pick["acquirer_key"], by_type) == ("s3", True)
-    assert [r["acquirer_key"] for r in reserves] == ["f2"]
-    assert engine.pick_reserve(top[2], top, []) == (None, False)
+    assert run["trace"]["quality"]["failed"] == ["gtcr"]
+    assert run["trace"]["quality"]["report_count"] == config.REPORT_COUNT - 1
 
 
 def test_wrong_model_stops_the_run_once(runs_dir, tmp_path, monkeypatch, capsys):
@@ -676,9 +647,201 @@ def test_llm_client_needs_key_and_uses_config(monkeypatch):
 
 
 def test_prompts_fill_every_placeholder():
-    entry = next(b for b in RANKING["buyers"] if b["selection_note"])
+    entry = dict(RANKING["buyers"][0], selection_note="Included under the balanced sensitivity scenario.")
     prompt = agent.research_prompt(entry, TARGET)
     assert "{" not in prompt.replace(json.dumps(TARGET, ensure_ascii=False), "").replace(
         json.dumps(entry, ensure_ascii=False), "")
     assert entry["selection_note"] in prompt and MID in prompt
     assert "{" not in agent.repair_prompt(["a: b"])
+
+
+@pytest.mark.anyio
+async def test_llm_unified_reasoning_preserves_schema_and_applies_configured_effort(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, 'CACHE_DIR', tmp_path / 'cache')
+    monkeypatch.setattr(config, 'LLM_MODEL', 'test/model')
+    stub = StubOpenAI(['reasoning', 'max_tokens', 'response_format', 'structured_outputs'])
+    llm = LLMClient(client=stub)
+    result = await llm.chat([{'role': 'user', 'content': 'review'}], response_schema=CommitteeReview)
+    request = stub.requests[0]
+    assert 'reasoning_effort' not in request
+    assert request['extra_body'] == {'reasoning': {'effort': config.REASONING_EFFORT, 'exclude': True},
+                                     'provider': {'require_parameters': True}}
+    assert 'reasoning_effort' not in result.dropped_parameters
+    assert request['response_format']['json_schema']['strict'] is True
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('parameters,format_type', [(['response_format'], 'json_object'), ([], None)])
+async def test_structured_fallback_keeps_local_validation(tmp_path, monkeypatch, parameters, format_type):
+    monkeypatch.setattr(config, 'CACHE_DIR', tmp_path / 'cache')
+    monkeypatch.setattr(config, 'LLM_MODEL', 'test/model')
+    stub = StubOpenAI(parameters)
+    result = await LLMClient(client=stub).chat([{'role': 'user', 'content': 'write'}], response_schema=ReportDraft)
+    request = stub.requests[0]
+    assert request.get('response_format', {}).get('type') == format_type
+    assert 'Return only a JSON object' in request['messages'][-1]['content']
+    assert result.parsed is None and result.parse_error  # invalid report is still rejected
+
+
+@pytest.mark.anyio
+async def test_non_tool_model_fails_before_research(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, 'CACHE_DIR', tmp_path / 'cache')
+    monkeypatch.setattr(config, 'LLM_MODEL', 'test/model')
+    stub = StubOpenAI(['response_format'])
+    from ma_engine.clients.llm_client import LLMConfigError
+    with pytest.raises(LLMConfigError, match='tool calling'):
+        await LLMClient(client=stub).validate_research_model()
+    assert not stub.requests
+
+
+@pytest.mark.anyio
+async def test_truncated_research_result_is_not_cached(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, 'CACHE_DIR', tmp_path / 'cache')
+    monkeypatch.setattr(config, 'LLM_MODEL', 'test/model')
+    class CutOff(StubOpenAI):
+        async def _create(self, **kwargs):
+            response = await super()._create(**kwargs)
+            response.choices[0].finish_reason = 'length'
+            response.choices[0].message.content = ''
+            return response
+    stub = CutOff(['max_tokens'])
+    client = LLMClient(client=stub)
+    for _ in range(2):
+        result = await client.chat([{'role': 'user', 'content': 'research'}])
+        assert result.truncated and not result.cache_hit
+    assert len(stub.requests) == 2
+    assert not list(config.CACHE_DIR.glob('*.json'))
+
+
+@pytest.mark.anyio
+async def test_requested_output_budget_respects_selected_model_limit(stub_llm):
+    stub, client = stub_llm
+    await client.supported_parameters()
+    client._max_completion_tokens = 4096
+    await client.chat([{'role': 'user', 'content': 'x'}], max_tokens=16000)
+    assert stub.requests[0]['max_tokens'] == 4096
+
+
+@pytest.mark.anyio
+async def test_partial_repair_preserves_unaffected_sections_exactly():
+    initial = {}
+    def write(messages):
+        if write_attempt(messages) == 0:
+            initial.update(bad_draft(messages))
+            return initial
+        updated = good_draft(messages)
+        updated['summary']['text'] = 'This unrelated replacement must never be applied.'
+        return updated
+    llm = FakeLLM(write=write)
+    report, _, trace = await run_one('nordic capital', llm)
+    assert report.status == 'verified'
+    assert report.draft.summary.model_dump() == initial['summary']
+    assert set(llm.calls[-1]['schema'].model_fields) == {'precedent_activity'}
+    assert trace['repair_attempts'] == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('mandatory,enabled', [(False, False), (True, True)])
+async def test_on_off_reasoning_models_use_advertised_capability(tmp_path, monkeypatch, mandatory, enabled):
+    monkeypatch.setattr(config, 'CACHE_DIR', tmp_path / 'cache')
+    monkeypatch.setattr(config, 'LLM_MODEL', 'test/model')
+    monkeypatch.setattr(config, 'REASONING_EFFORT', 'low')
+    stub = StubOpenAI(['reasoning', 'max_tokens'])
+    client = LLMClient(client=stub)
+    await client.supported_parameters()
+    client._reasoning = {'mandatory': mandatory}
+    result = await client.chat([{'role': 'user', 'content': 'x'}])
+    assert stub.requests[0]['extra_body']['reasoning'] == {'enabled': enabled, 'exclude': True}
+    assert result.warnings and 'on/off only' in result.warnings[0]
+
+
+def test_retry_delay_respects_provider_guidance(monkeypatch):
+    from types import SimpleNamespace
+    from ma_engine.clients.llm_client import _retry_delay
+    error = SimpleNamespace(status_code=429, response=SimpleNamespace(headers={}))
+    assert _retry_delay(error, 1) == 60
+    error.response.headers['retry-after'] = '12'
+    assert _retry_delay(error, 1) == 12
+    monkeypatch.setattr('ma_engine.clients.llm_client.time.time', lambda: 0)
+    error.response.headers['retry-after'] = 'Thu, 01 Jan 1970 00:01:00 GMT'
+    assert _retry_delay(error, 1) == 60
+    error.response.headers['retry-after'] = 'invalid'
+    assert _retry_delay(error, 1) == 60
+
+
+@pytest.mark.anyio
+async def test_rate_limit_retries_after_shared_cooldown(stub_llm, monkeypatch):
+    stub, client = stub_llm
+    clock = [100.0]
+    sleeps = []
+    async def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+    monkeypatch.setattr('ma_engine.clients.llm_client.time.monotonic', lambda: clock[0])
+    monkeypatch.setattr('ma_engine.clients.llm_client.asyncio.sleep', sleep)
+    calls = []
+    async def create(**kwargs):
+        calls.append(clock[0])
+        if len(calls) == 1:
+            response = SimpleNamespace(status_code=429, request=None, headers={'retry-after': '17'})
+            raise openai.RateLimitError('Slow down', response=response, body=None)
+        return await stub._create(**kwargs)
+    stub.chat.completions.create = create
+    result = await client.chat([{'role': 'user', 'content': 'x'}], use_cache=False)
+    assert calls == [100, 117]
+    assert sleeps == [17]
+    assert len(result.attempts) == 2 and result.attempts[-1]['error'] is None
+
+
+@pytest.mark.anyio
+async def test_reasoning_effort_selection_does_not_depend_on_metadata_order(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, 'CACHE_DIR', tmp_path / 'cache')
+    monkeypatch.setattr(config, 'LLM_MODEL', 'test/model')
+    monkeypatch.setattr(config, 'REASONING_EFFORT', 'minimal')
+    stub = StubOpenAI(['reasoning', 'max_tokens'])
+    client = LLMClient(client=stub)
+    await client.supported_parameters()
+    client._reasoning = {'supported_efforts': ['high', 'low', 'medium']}
+    await client.chat([{'role': 'user', 'content': 'x'}])
+    assert stub.requests[0]['extra_body']['reasoning']['effort'] == 'low'
+
+
+def test_strict_schema_has_no_ref_siblings_and_retains_statement_constraints():
+    from ma_engine.clients.llm_client import strict_schema
+    schema = strict_schema(ReportDraft)
+    def inspect(node):
+        if isinstance(node, dict):
+            if '$ref' in node:
+                assert set(node) == {'$ref'}
+            for child in node.values():
+                inspect(child)
+        elif isinstance(node, list):
+            for child in node:
+                inspect(child)
+    inspect(schema)
+    summary = schema['properties']['summary']
+    assert summary['additionalProperties'] is False
+    assert set(summary['required']) == {'text', 'kind', 'source_ids'}
+    assert summary['description'].startswith('One sentence')
+
+
+def test_failed_reports_still_get_resolvable_ranking_citations():
+    from types import SimpleNamespace
+    reports = [SimpleNamespace(acquirer_key=entry['acquirer_key']) for entry in RANKING['buyers'][:10]]
+    sources = engine.complete_ranking_sources({'numbers': {}, 'entries': []}, RANKING, reports)
+    assert len(sources['numbers']) == 30
+    for report in reports:
+        for field in ['relevant_closed_count', 'direct_closed_count', 'near_size_closed_count']:
+            source_id = ENTRIES[report.acquirer_key][field]['stat_id']
+            assert source_id in sources['numbers']
+    assert engine.complete_ranking_sources(sources, RANKING, reports) == sources
+
+
+def test_strict_followup_schema_requires_defaulted_output_fields():
+    from ma_engine.clients.llm_client import strict_schema
+    from ma_engine.models import FollowupAnswer
+    schema = strict_schema(FollowupAnswer)
+    assert set(schema['required']) == set(schema['properties'])
+    assert 'include_source_catalog' in schema['required']
+    # Existing locally stored answers can still omit the defaulted flag.
+    assert FollowupAnswer(statements=[]).include_source_catalog is False

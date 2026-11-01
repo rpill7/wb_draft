@@ -40,7 +40,7 @@ class ScriptLLM:
                        "completion_tokens": 0, "cost_usd": 0.0}
 
     async def chat(self, messages, tools=None, tool_choice=None, response_schema=None,
-                   use_cache=True):
+                   use_cache=True, max_tokens=None):
         self.totals["calls"] += 1
         content = self.payload if isinstance(self.payload, str) else json.dumps(self.payload)
         parsed, error = (None, None)
@@ -63,7 +63,7 @@ class FollowLLM:
                        "completion_tokens": 0, "cost_usd": 0.0}
 
     async def chat(self, messages, tools=None, tool_choice=None, response_schema=None,
-                   use_cache=True):
+                   use_cache=True, max_tokens=None):
         self.totals["calls"] += 1
         if response_schema is None:
             calls = self.research(messages)
@@ -187,6 +187,12 @@ def test_events_match_execution_and_ranking_is_saved(runs_dir, monkeypatch):
     loaded = engine.load_run(run_dir)
     assert loaded["run_id"] == run["run_id"]
     assert loaded["target"] == run["target"]
+    assert loaded["research_title"] == "Healthcare Services buyer research"
+    assert "research_title" not in loaded["target"].model_dump()
+    for call in seen:
+        assert "research_title" not in call["arguments"]
+        assert "buyer research" not in json.dumps(call["arguments"])
+    assert not any(event["name"] == "parse_request" for event in events)
     assert [r.acquirer_key for r in loaded["reports"]] == [r.acquirer_key for r in run["reports"]]
     assert loaded["ranking"]["candidate_count"] == ranking["candidate_count"]
     saved_events = loaded["trace"]["events"]
@@ -259,8 +265,12 @@ def test_parse_assignment_sentence_is_the_default_target():
     payload = {"sector": "Healthcare Services", "ev_value": 200, "ev_unit": "million",
                "ownership": None, "geography": "Multi-Regional", "margin_profile": "strong"}
     events = []
-    target, defaulted = asyncio.run(agent.parse_request(ASSIGNMENT, ScriptLLM(payload),
-                                                        progress=events.append))
+    llm = ScriptLLM(payload)
+    target, defaulted, title = asyncio.run(agent.parse_request(ASSIGNMENT, llm,
+                                                               progress=events.append))
+    assert llm.totals["calls"] == 1
+    assert title is None
+    assert "title" not in target.model_dump()
     assert target == Target.default()
     assert target.geography == "Any region"
     assert defaulted == ["ownership"]
@@ -274,7 +284,8 @@ def test_parse_named_region_and_ev_and_defaulted_fields():
     text = "Find buyers for a Northeast Healthcare Services business worth $450M EV."
     payload = {"sector": "Healthcare Services", "ev_value": 450, "ev_unit": "million",
                "ownership": None, "geography": None, "margin_profile": None}
-    target, defaulted = asyncio.run(agent.parse_request(text, ScriptLLM(payload)))
+    target, defaulted, title = asyncio.run(agent.parse_request(text, ScriptLLM(payload)))
+    assert title is None
     assert (target.sector, target.geography, target.ev_mm) == ("Healthcare Services", "Northeast", 450)
     assert target.ownership == "Private" and target.margin_profile == "strong"
     assert defaulted == ["ownership", "margin_profile"]
@@ -303,9 +314,105 @@ def test_parse_target_creates_one_client(monkeypatch):
             super().__init__(payload)
 
     monkeypatch.setattr(engine, "LLMClient", One)
-    target, defaulted = asyncio.run(engine.parse_target(ASSIGNMENT))
+    target, defaulted, title = asyncio.run(engine.parse_target(ASSIGNMENT))
     assert len(created) == 1
+    assert title is None
     assert target == Target.default() and defaulted == ["ownership"]
+
+
+def _parse_payload(**extra):
+    payload = {"sector": "Healthcare Services", "ev_value": 200, "ev_unit": "million",
+               "ownership": None, "geography": "Any region", "margin_profile": "strong"}
+    payload.update(extra)
+    return payload
+
+
+def test_parse_keeps_a_valid_title_in_one_call():
+    llm = ScriptLLM(_parse_payload(title="  regional\nhealthcare buyers  "))
+    target, defaulted, title = asyncio.run(agent.parse_request(ASSIGNMENT, llm))
+    assert llm.totals["calls"] == 1
+    assert title == "Regional healthcare buyers"
+    assert defaulted == ["ownership"]
+    assert target == Target.default()
+    assert "title" not in target.model_dump()
+    assert "research_title" not in target.model_dump()
+
+
+def test_a_bad_title_does_not_fail_the_parse_or_call_again():
+    for bad in ("New research", "Regional healthcare buyers.", '"Quoted buyer research"',
+                "Too short", "One two three four five six seven", "Regional buyers 200",
+                "Regional healthcare buyers!!!", None, ["Regional healthcare buyers"]):
+        llm = ScriptLLM(_parse_payload(title=bad))
+        target, _defaulted, title = asyncio.run(agent.parse_request(ASSIGNMENT, llm))
+        assert llm.totals["calls"] == 1
+        assert title is None
+        assert target.sector == "Healthcare Services"
+
+
+def test_old_and_new_parse_payloads_both_validate():
+    from ma_engine.clients.llm_client import strict_schema
+    from ma_engine.models import RequestFields
+
+    old = _parse_payload()
+    parsed, error = _parse(json.dumps(old), RequestFields)
+    assert error is None and parsed.title is None
+    new = _parse_payload(title="Regional healthcare buyers")
+    parsed, error = _parse(json.dumps(new), RequestFields)
+    assert error is None and parsed.title == "Regional healthcare buyers"
+    bad_type, error = _parse(json.dumps(_parse_payload(title={"name": "nope"})), RequestFields)
+    assert error is None and bad_type.title is None
+    schema = strict_schema(RequestFields)
+    assert "title" in schema["properties"]
+    assert "title" in schema["required"]
+    assert "default" not in schema["properties"]["title"]
+
+
+def test_saved_title_reloads_and_a_missing_title_falls_back(tmp_path):
+    folder = tmp_path / "20261101-014500"
+    folder.mkdir()
+    engine.save_run(folder, folder.name, Target.default(), [], {"events": []}, {"buyers": []},
+                    research_title="Regional healthcare buyers")
+    saved = json.loads((folder / "reports.json").read_text())
+    assert saved["research_title"] == "Regional healthcare buyers"
+    assert "research_title" not in saved["target"]
+    assert "title" not in saved["target"]
+    loaded = engine.load_run(folder)
+    assert loaded["research_title"] == "Regional healthcare buyers"
+    again = engine.load_run(folder)
+    assert again["research_title"] == loaded["research_title"]
+    assert (folder / "reports.json").read_text() == json.dumps(saved, indent=2, ensure_ascii=False) + "\n"
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    engine.save_run(plain, "plain", Target.default(), [], {"events": []}, {"buyers": []})
+    assert json.loads((plain / "reports.json").read_text())["research_title"] == (
+        "Healthcare Services buyer research")
+
+    rejected = tmp_path / "rejected"
+    rejected.mkdir()
+    engine.save_run(rejected, "rejected", Target.default(), [], {"events": []}, {"buyers": []},
+                    research_title="New research")
+    assert engine.load_run(rejected)["research_title"] == "Healthcare Services buyer research"
+
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    body = {"run_id": "legacy", "target": Target.default().model_dump(), "reports": []}
+    path = legacy / "reports.json"
+    path.write_text(json.dumps(body), encoding="utf-8")
+    before = path.read_text()
+    assert engine.load_run(legacy)["research_title"] == "Healthcare Services buyer research"
+    assert path.read_text() == before
+
+
+def test_fallback_keeps_the_sector_spelling():
+    assert agent.fallback_research_title("Home Health/Hospice") == "Home Health/Hospice buyer research"
+    assert agent.fallback_research_title("") == "Buyer research"
+    assert agent.fallback_research_title(None) == "Buyer research"
+    assert agent.display_research_title(
+        "Home Health/Hospice buyer research", "Home Health/Hospice") == (
+            "Home Health/Hospice buyer research")
+    assert agent.clean_research_title("Strategic software acquirers") == "Strategic software acquirers"
+    assert agent.clean_research_title("Manufacturing buyer research") == "Manufacturing buyer research"
 
 
 # ---------- follow-up answers ----------
@@ -335,6 +442,18 @@ def test_followup_cited_answer_is_verified(buyer_run):
     assert tools_done[0]["input"] == {"acquirer_key": "blackstone", "sectors": ["Healthcare Services"]}
     assert "deals" in tools_done[0]["output"]["data"]
     assert result.totals["llm_calls"] >= 1 and "wall_time_s" in result.totals
+
+
+def test_followup_works_when_a_buyer_failed(buyer_run):
+    written = buyer_run["reports"][0]
+    failed = written.model_copy(update={"draft": None, "status": "failed", "issues": [],
+                                        "error": "ReportError: no valid report"})
+    run = {**buyer_run, "reports": [written, failed]}
+    summaries = agent.report_summaries(run["reports"])
+    assert summaries[1]["conviction"] is None and summaries[1]["strategic_fit"] == []
+    assert summaries[1]["status"] == "failed"
+    result = _ask(run, deal_answer)
+    assert result.status == "verified"
 
 
 def test_followup_swapped_number_is_repaired(buyer_run):
@@ -370,11 +489,102 @@ def test_run_followup_opens_one_session_and_saves(buyer_run, monkeypatch):
     monkeypatch.setattr(engine, "MCPClient", make)
     monkeypatch.setattr(engine, "LLMClient", lambda: FollowLLM(unknown_answer, research=lambda messages: []))
     question = "What is their current fund size?"
+    reports_path = Path(buyer_run["run_dir"]) / "reports.json"
+    before = reports_path.read_text()
     result = asyncio.run(engine.run_followup(question, buyer_run))
     assert len(created) == 1 and created[0].sessions_opened == 1
     assert result.status == "verified"
+    assert reports_path.read_text() == before
+    assert json.loads(before)["research_title"] == "Healthcare Services buyer research"
+    assert not any(event.get("name") == "parse_request" for event in result.events)
     path = Path(buyer_run["run_dir"]) / "followups.json"
     saved = json.loads(path.read_text())
     assert isinstance(saved, list) and saved[0]["question"] == question
     assert saved[0]["status"] == "verified" and saved[0]["statements"][0]["kind"] == "unknown"
     assert saved[0]["events"] and saved[0]["markdown"].startswith("**Status:**")
+
+
+def test_stage_groups_partition_events_and_keep_housekeeping():
+    from ma_engine.ui_trace import stage_groups
+    events = [
+        {"step": 1, "category": "mcp_tool", "name": "rank_acquirers", "status": "running"},
+        {"step": 1, "category": "mcp_tool", "name": "rank_acquirers", "status": "completed"},
+        {"step": 2, "category": "llm", "name": "research", "status": "completed"},
+        {"step": 3, "category": "llm", "name": "write", "status": "completed"},
+        {"step": 4, "category": "app", "name": "save", "status": "completed"},
+    ]
+    groups = {g["id"]: g["steps"] for g in stage_groups(events)}
+    assert len(groups["identify"]) == 1
+    assert groups["identify"][0]["status"] == "completed"
+    assert groups["investigate"][0]["step"] == 2
+    assert groups["reports"][0]["step"] == 3
+    assert groups["technical"][0]["step"] == 4
+    assert sum(map(len, groups.values())) == 4
+
+
+def test_stage_result_distinguishes_repaired_checks_from_unresolved():
+    from ma_engine.ui_trace import stage_result
+    events = [
+        {"category": "validation", "acquirer_key": "example", "output": ["bad citation"]},
+        {"category": "validation", "acquirer_key": "example", "output": []},
+    ]
+    group = {"id": "reports", "steps": events}
+    assert "latest checks passed" in stage_result(group)
+    assert "latest checks need review" not in stage_result(group)
+    events[-1]["output"] = ["still wrong"]
+    assert "1 latest checks need review" in stage_result(group)
+
+
+def test_request_rejects_unsupported_constraints_before_model_call():
+    for question in ("Find 50 likely acquirers.",
+                     "Find buyers for a $200M company with a 90% EBITDA margin.",
+                     "Find buyers for a company in an industry not represented in the dataset.",
+                     "Find only financial sponsors that have acquired similar healthcare businesses."):
+        with pytest.raises(RequestError):
+            asyncio.run(agent.parse_request(question, None))
+
+
+def test_average_margin_request_does_not_default_to_strong():
+    fields = {"sector": "Healthcare Services", "ev_value": 350, "ev_unit": "million",
+              "ownership": None, "geography": None, "margin_profile": None}
+    target, defaults, _ = asyncio.run(agent.parse_request(
+        "Find buyers for a $350M Healthcare Services business with average margins.", ScriptLLM(fields)))
+    assert target.margin_profile == "any" and "margin_profile" not in defaults
+
+
+def test_llm_timeout_stops_at_retry_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(config, "LLM_MODEL", "test/model")
+    monkeypatch.setattr(config, "OPENROUTER_API_KEY", SECRET)
+    monkeypatch.setattr("ma_engine.clients.llm_client._backoff", lambda attempt: 0)
+    class TimedOut(StubOpenAI):
+        async def _create(self, **kwargs):
+            self.requests.append(kwargs)
+            raise openai.APITimeoutError(request=httpx2.Request("POST", "https://example.com/chat"))
+    client = TimedOut(["max_tokens"])
+    with pytest.raises(openai.APITimeoutError):
+        asyncio.run(LLMClient(client=client).chat([{"role": "user", "content": "test"}], use_cache=False))
+    assert len(client.requests) == config.MAX_RETRIES
+
+
+def test_saved_run_context_handles_trace_counts_and_has_separate_provenance(buyer_run):
+    from ma_engine.followup_context import saved_context
+    from ma_engine.guardrails import build_answer_evidence, check_statements
+    from ma_engine.models import Statement
+    buyer_run['trace']['events'] = [{'step': 1, 'category': 'mcp_tool', 'name': 'get_acquirer_profile',
+                                     'output_summary': {'source_ids': 25, 'rows': 1}}]
+    context, result = saved_context(buyer_run, 'What tools did you call for Blackstone?')
+    ev = build_answer_evidence(buyer_run['ranking']['target'], agent.run_entries(buyer_run), [{'result': result}])
+    sid = context['run_record']['stat_id']
+    assert sid.startswith('ST-RUN-') and sid in ev.stats
+    assert not check_statements([Statement(text='The recorded tool returned 25 source IDs.', kind='fact', source_ids=[sid])], ev)
+    assert context['run_record']['details']['activity'][0]['name'] == 'get_acquirer_profile'
+
+
+def test_followup_run_context_uses_actual_citation_and_previous_buyer(buyer_run):
+    from ma_engine.followup_context import saved_context
+    buyer_run['followups'] = [{'question': 'What is Blackstone doing?', 'statements': [], 'status': 'verified'}]
+    context, result = saved_context(buyer_run, 'Show me the source for your median deal size.')
+    assert context['requested_buyer_reports'][0]['display_name'] == 'Blackstone'
+    assert context['previous_turns_for_reference_only'][0]['question'] == 'What is Blackstone doing?'
+    assert result['data']['saved_sources']

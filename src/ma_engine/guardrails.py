@@ -42,6 +42,39 @@ of `config.RUNS_DIR` (folder names are sortable timestamps such as `20261031-173
     {"run_id": "20261031-173000",
      "target": {<Target fields>},
      "reports": [<BuyerReport.model_dump()>, ...]}
+
+Public contract (Subplan 9)
+---------------------------
+Citation check, in addition to the rules above:
+
+- A money, multiple or percent figure that equals a statistic's `display` must cite
+  that statistic's `ST-` id (`cite ST-… for 12.1x`). A figure that equals a cited
+  deal's own field does not need the statistic id.
+- `n=<count>` must equal `n` on a cited statistic whose display is quoted in the
+  same statement.
+- Percentile labels are not numbers: `p25`, `p50`, `p75`, `p90`, `25th percentile`,
+  `75th percentile`, and the words `median` and `interquartile`.
+- An `unknown` statement may quote numbers from the target block (for example
+  `$200.0M`). Other numbers are still rejected.
+- `summary` is checked like the other statements.
+
+`build_sources(reports, ranking=None)` returns:
+
+    {"numbers": {source_id: number, ...},
+     "entries": [{"number", "id", "kind": "deal"|"statistic", "record"}, ...]}
+
+Numbers follow first appearance: buyer summaries in rank order, then each report's
+sections in order (overview, fit, precedents, valuation, risks, conviction).
+A number is stored only when the deal row or `stat_record` exists.
+`kind` `deal` records are the full processed CSV row. `statistic` records are the
+registry record. Follow-up answers keep these numbers and append new ids after the
+last number (`extend_sources`); they do not renumber earlier sources.
+
+`render_narrative(reports, target, ranking, sources)` is the `reports.md` document:
+executive summary, ranked shortlist, each buyer's six sections as paragraphs with
+`[n]` markers, verification status, and a numbered Sources appendix.
+`quality_metrics` `report_count` is how many buyers produced a report body.
+`failed` lists buyers whose status is `failed`.
 """
 
 import json
@@ -54,11 +87,20 @@ from pathlib import Path
 from typing import NamedTuple
 
 from ma_engine import config
-from ma_engine.clients.data_client import get_client
+from ma_engine.clients.data_client import get_client, slug
 from ma_engine.models import BuyerReport, ReportDraft, Statement
-from ma_engine.prepare import CLOSED, KNOWN_VALUES, NON_CLOSED_OUTCOMES
+from ma_engine.prepare import CLOSED, KNOWN_VALUES, NON_CLOSED_OUTCOMES, fmt_money
 
 ID_PATTERN = re.compile(r"MA-\d{4}-\d{4}")
+STAT_ID_PATTERN = re.compile(r"ST-(?:COMPS|PROFILE|SECTOR|RANK|RUN)-[a-z0-9_]+(?:-[a-z0-9_]+)*")
+# Percentile labels are names of a statistic, not quotable numbers. "p25" must not
+# be read as 25, and "25th percentile" is already dropped as an ordinal.
+PERCENTILE_LABEL = re.compile(
+    r"\bp(?:25|50|75|90)\b"
+    r"|\b(?:25|50|75|90)(?:st|nd|rd|th)\s+percentiles?\b"
+    r"|\b(?:median|interquartile)\b",
+    re.IGNORECASE,
+)
 YEAR_PATTERN = re.compile(r"(?:19|20)\d{2}")
 OUTCOME_PATTERN = re.compile(r"\b(?:" + "|".join(NON_CLOSED_OUTCOMES) + r")\b", re.IGNORECASE)
 # Deal types are matched in their dataset spelling (plural allowed), so "a strategic
@@ -83,7 +125,7 @@ COMPLETION_PATTERN = re.compile(
 )
 
 SECTIONS = ["acquirer_overview", "strategic_fit", "precedent_activity", "valuation_context"]
-BUYER_SECTIONS = {"acquirer_overview", "strategic_fit", "precedent_activity"}
+BUYER_SECTIONS = {"summary", "acquirer_overview", "strategic_fit", "precedent_activity"}
 BUYER_TOOLS = {"get_acquirer_profile", "get_acquirer_deals"}
 SECTION_TITLES = {
     "acquirer_overview": "Acquirer Overview",
@@ -143,7 +185,9 @@ def _name_pattern() -> re.Pattern:
 
 
 def _number_matches(text: str) -> list[str]:
-    text = LABEL_PATTERN.sub(" ", _name_pattern().sub(" ", ID_PATTERN.sub(" ", text)))
+    text = STAT_ID_PATTERN.sub(" ", ID_PATTERN.sub(" ", text))
+    text = PERCENTILE_LABEL.sub(" ", text)
+    text = LABEL_PATTERN.sub(" ", _name_pattern().sub(" ", text))
     return [m.group() for m in NUMBER_PATTERN.finditer(text)]
 
 
@@ -175,6 +219,21 @@ class Source:
 
 
 @dataclass(frozen=True)
+class StatRef:
+    """One statistic the buyer was shown. `display` is quoted exactly; `n` is its sample size.
+
+    `text_numbers` are the display, the sample size, and any numbers in the calculation
+    or ranking explanation. Citing the stat_id backs those numbers.
+    """
+
+    stat_id: str
+    display: str
+    n: str | None
+    source_ids: frozenset[str]
+    text_numbers: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
 class Evidence:
     acquirer_key: str
     display_name: str
@@ -189,6 +248,8 @@ class Evidence:
     target_names: frozenset[str] = field(repr=False)
     figures: dict[str, str] = field(repr=False)  # deal-row ID -> headline display strings
     deals: dict[str, Deal] = field(repr=False)  # every dataset ID -> target, buyer, outcome...
+    stats: dict[str, StatRef] = field(repr=False)  # stat_id -> the statistic the buyer was shown
+    deal_numbers: dict[str, frozenset[str]] = field(repr=False)  # deal ID -> its field displays
 
 
 def _plain(number) -> str:
@@ -228,7 +289,39 @@ def _figures(row: dict) -> str:
     return ", ".join(s for s in shown if s and "None" not in s)
 
 
-def _walk(obj, ids: frozenset[str], kind: str, own_key: str, out: list, figures: dict) -> None:
+def _remember_stat(obj: dict, stats: dict) -> None:
+    """Keep a statistic the walk just saw, keyed by the stat_id on that object."""
+    sid = obj.get("stat_id")
+    display = obj.get("display", obj.get("value_display"))
+    if not isinstance(sid, str) or not isinstance(display, str) or not display:
+        return
+    n = obj.get("n")
+    if isinstance(n, float) and n.is_integer():
+        n = int(n)
+    n_text = None if n is None else str(n)
+    blob = "\n".join(str(obj.get(key) or "") for key in
+                     ("display", "value_display", "explanation", "calculation"))
+    numbers = set(number_tokens(blob))
+    if n_text:
+        numbers.add(n_text)
+    stats[sid] = StatRef(sid, display, n_text, frozenset(obj.get("source_ids") or []),
+                         frozenset(numbers))
+
+
+def _deal_number_index(sources: list[Source]) -> dict[str, frozenset[str]]:
+    """Display tokens that sit on exactly one deal row."""
+    found: dict[str, set[str]] = {}
+    for source in sources:
+        if len(source.ids) != 1:
+            continue
+        tid = next(iter(source.ids))
+        if ID_PATTERN.fullmatch(tid):
+            found.setdefault(tid, set()).update(source.numbers)
+    return {tid: frozenset(tokens) for tid, tokens in found.items()}
+
+
+def _walk(obj, ids: frozenset[str], kind: str, own_key: str, out: list, figures: dict,
+          stats: dict) -> None:
     """Add a Source for every dict or list, with the IDs of the nearest deal row or source_ids.
 
     A deal row supports only its own transaction_id and is "buyer" only if it is this buyer's
@@ -236,14 +329,15 @@ def _walk(obj, ids: frozenset[str], kind: str, own_key: str, out: list, figures:
     An `assumption` field (hand-written judgment) supports no ID, so no citation can bind it.
     """
     if isinstance(obj, dict):
+        _remember_stat(obj, stats)
         if "transaction_id" in obj:
             ids = frozenset([obj["transaction_id"]])
             kind = "buyer" if obj.get("acquirer_key") == own_key else "comp"
             figures[obj["transaction_id"]] = _figures(obj)
-        elif obj.get("source_ids"):
+        elif isinstance(obj.get("source_ids"), (list, tuple)) and obj["source_ids"]:
             ids = frozenset(obj["source_ids"])
         if isinstance(obj.get("assumption"), dict):
-            _walk(obj["assumption"], frozenset(), "assumption", own_key, out, figures)
+            _walk(obj["assumption"], frozenset(), "assumption", own_key, out, figures, stats)
         children = [v for k, v in obj.items() if k != "assumption"]
         leaves = {k: v for k, v in obj.items() if not isinstance(v, (dict, list))}
         n = _sample_size(obj)
@@ -261,7 +355,7 @@ def _walk(obj, ids: frozenset[str], kind: str, own_key: str, out: list, figures:
         out.append(Source(ids, kind, numbers, pairs))
     for child in children:
         if isinstance(child, (dict, list)):
-            _walk(child, ids, kind, own_key, out, figures)
+            _walk(child, ids, kind, own_key, out, figures, stats)
 
 
 def build_evidence(ranking_entry: dict, tool_results: list[dict]) -> Evidence:
@@ -274,16 +368,16 @@ def build_evidence(ranking_entry: dict, tool_results: list[dict]) -> Evidence:
     text = "\n".join(_texts([ranking_entry, *[call["result"] for call in tool_results]]))
     entry_ids = frozenset(ranking_entry.get("supporting_closed_ids", [])
                           + ranking_entry.get("weak_signal_ids", []))
-    sources, figures, target_text = [], {}, ""
-    _walk(ranking_entry, entry_ids, "buyer", key, sources, figures)
+    sources, figures, stats, target_text = [], {}, {}, ""
+    _walk(ranking_entry, entry_ids, "buyer", key, sources, figures, stats)
     for call in tool_results:
         result, data = call["result"], call["result"].get("data")
         if isinstance(data, dict) and "target" in data:
-            _walk(data["target"], frozenset(), "target", key, sources, figures)
+            _walk(data["target"], frozenset(), "target", key, sources, figures, stats)
             target_text = "\n".join(_texts(data["target"]))
             result = {**result, "data": {k: v for k, v in data.items() if k != "target"}}
         kind = "buyer" if call["tool"] in BUYER_TOOLS else "comp"
-        _walk(result, frozenset(), kind, key, sources, figures)
+        _walk(result, frozenset(), kind, key, sources, figures, stats)
     return Evidence(
         acquirer_key=key,
         display_name=ranking_entry["display_name"],
@@ -298,6 +392,8 @@ def build_evidence(ranking_entry: dict, tool_results: list[dict]) -> Evidence:
         target_names=frozenset(company_names(target_text)),
         figures=figures,
         deals=_deals(),
+        stats=stats,
+        deal_numbers=_deal_number_index(sources),
     )
 
 
@@ -313,8 +409,10 @@ class Item(NamedTuple):
 
 def _items(draft: ReportDraft) -> list[Item]:
     """Every checkable piece of text, with its label and citations."""
-    items = [Item(f"{section}[{i}]", section, s.text, s.kind, s.source_ids)
-             for section in SECTIONS for i, s in enumerate(getattr(draft, section))]
+    summary = draft.summary
+    items = [Item("summary", "summary", summary.text, summary.kind, summary.source_ids)]
+    items += [Item(f"{section}[{i}]", section, s.text, s.kind, s.source_ids)
+              for section in SECTIONS for i, s in enumerate(getattr(draft, section))]
     items += [Item(f"risk_flags[{i}]", "risk_flags", f"{f.risk}. {f.explanation}", f.kind,
                    f.source_ids) for i, f in enumerate(draft.risk_flags)]
     c = draft.conviction
@@ -376,16 +474,22 @@ def _check_citations(item: Item, ev: Evidence) -> list[str]:
                           "Cite the IDs of the facts it rests on, or label it unknown (no "
                           "numbers, no IDs).")
     for tid in item.source_ids:
-        if not ID_PATTERN.fullmatch(tid):
+        if ID_PATTERN.fullmatch(tid):
+            if tid not in ev.outcomes:
+                issues.append(f"{item.location}: cites {tid}, which does not exist in the dataset. "
+                              "Remove it; cite only IDs from your tool results.")
+            elif tid not in ev.allowed_ids:
+                issues.append(f"{item.location}: cites {tid}, which is not in the tool results for "
+                              "this buyer. Remove it, or call a tool that returns it first.")
+        elif STAT_ID_PATTERN.fullmatch(tid):
+            if tid not in ev.stats:
+                issues.append(f"{item.location}: cites {tid}, which is not in the tool results "
+                              "for this buyer. Cite a statistic id only after a tool returns it.")
+        else:
             issues.append(f"{item.location}: \"{tid}\" is not a transaction ID (format "
-                          "MA-YYYY-NNNN). Use IDs exactly as the tools returned them.")
-        elif tid not in ev.outcomes:
-            issues.append(f"{item.location}: cites {tid}, which does not exist in the dataset. "
-                          "Remove it; cite only IDs from your tool results.")
-        elif tid not in ev.allowed_ids:
-            issues.append(f"{item.location}: cites {tid}, which is not in the tool results for "
-                          "this buyer. Remove it, or call a tool that returns it first.")
-    for tid in ID_PATTERN.findall(item.text):
+                          "MA-YYYY-NNNN) or a statistic ID (ST-...). Use IDs exactly as the "
+                          "tools returned them.")
+    for tid in [*ID_PATTERN.findall(item.text), *STAT_ID_PATTERN.findall(item.text)]:
         if tid not in item.source_ids:
             issues.append(f"{item.location}: the text mentions {tid} but source_ids does not "
                           "include it. Add it to source_ids or remove it from the text.")
@@ -462,17 +566,103 @@ def _unbound_number(raw: str, token: str, item: Item, cited: set[str], ev: Evide
             f"none of which the statement cites. Cite one of them{use_cited}.")
 
 
+def _unit(token: str) -> bool:
+    """Money, multiples and percentages. Plain counts are not tied to one statistic."""
+    return token.startswith("$") or token.startswith("-$") or token.endswith(("x", "%"))
+
+
+def _display_token(display: str | None) -> str | None:
+    if not display:
+        return None
+    tokens = [token.replace(",", "") for token in _number_matches(display)]
+    return tokens[0] if len(tokens) == 1 else None
+
+
+def _target_tokens(ev: Evidence) -> set[str]:
+    return {token for source in ev.sources if source.kind == "target" for token in source.numbers}
+
+
+def _matching_stats(token: str, ev: Evidence) -> list[StatRef]:
+    return [stat for stat in ev.stats.values() if _display_token(stat.display) == token]
+
+
+def _best_stat(matches: list[StatRef], cited: set[str]) -> StatRef:
+    """The statistic a repair message should name. Prefer one that shares a cited deal."""
+    return min(matches, key=lambda stat: (0 if stat.source_ids & cited else 1,
+                                          len(stat.source_ids), stat.stat_id))
+
+
+def _filter_tokens(stat_id: str) -> set[str]:
+    """Numbers written in the statistic's filters, such as the size-band edges."""
+    record = get_client().stat_record(stat_id)
+    if not record:
+        return set()
+    return number_tokens(json.dumps(record["filters"], default=str))
+
+
+def _cited_display_stats(token: str, cited: set[str], ev: Evidence) -> list[StatRef]:
+    return [ev.stats[sid] for sid in cited
+            if sid in ev.stats and _display_token(ev.stats[sid].display) == token]
+
+
+def _stat_covers(token: str, cited: set[str], ev: Evidence) -> bool:
+    """True when a cited statistic's display, sample size, explanation or filters show `token`."""
+    for sid in cited:
+        stat = ev.stats.get(sid)
+        if stat is None:
+            continue
+        if token in stat.text_numbers or token in _filter_tokens(sid):
+            return True
+    return False
+
+
+def _comp_stat(stat: StatRef) -> bool:
+    return stat.stat_id.startswith(("ST-COMPS-", "ST-SECTOR-"))
+
+
 def _check_numbers(item: Item, ev: Evidence) -> list[str]:
-    """Every number must be in a source whose IDs overlap the cited IDs (target block exempt)."""
+    """Deal figures must match a cited deal. Statistic figures must match a cited stat_id.
+
+    A money, multiple or percent that equals a statistic display is a statistic figure.
+    Citing one of that statistic's deals is not enough. Percentile labels are removed
+    before this runs, so p25 is not the number 25. Target-block figures need no citation.
+    """
     issues, cited = [], set(_cited(item))
+    deal_tokens = set().union(*(ev.deal_numbers.get(tid, frozenset()) for tid in cited))
+    target = _target_tokens(ev)
     for raw in dict.fromkeys(_number_matches(SAMPLE_SIZE_PATTERN.sub(" ", item.text))):
         token = raw.replace(",", "")
         if token not in ev.allowed_numbers:
             issues.append(f"{item.location}: number \"{raw}\" does not appear in the tool results "
                           "for this buyer. Copy numbers exactly as displayed (e.g. \"$185.0M\", "
                           f"\"12.1x\", \"15.2%\"), or remove it.{_near_miss(token, ev.allowed_numbers)}")
-        elif cited and not _is_cited_year(token, cited, ev) and not any(
-                token in s.numbers and _supported(s, item, cited) for s in ev.sources):
+            continue
+        if _stat_covers(token, cited, ev):
+            displays = _cited_display_stats(token, cited, ev)
+            if item.section in BUYER_SECTIONS and displays and all(_comp_stat(s) for s in displays):
+                issues.append(f"{item.location}: \"{raw}\" is a comps or other-buyer figure "
+                              f"({displays[0].stat_id}). In {item.section}, quote this buyer's own "
+                              "deal figures, or move the statement to valuation_context.")
+            continue
+        if token in target:
+            continue
+        if token in deal_tokens or _is_cited_year(token, cited, ev):
+            if cited and not _is_cited_year(token, cited, ev) and not any(
+                    token in source.numbers and _supported(source, item, cited)
+                    for source in ev.sources):
+                issues.append(_unbound_number(raw, token, item, cited, ev))
+            continue
+        matches = _matching_stats(token, ev) if _unit(token) else []
+        # A one-deal extreme (smallest, largest) is that deal's own figure. A median
+        # or percentile over several deals must cite the statistic id.
+        multi = [stat for stat in matches if len(stat.source_ids) != 1]
+        if multi:
+            best = _best_stat(multi, cited)
+            issues.append(f"{item.location}: number \"{raw}\" is not backed by a cited statistic. "
+                          f"Cite {best.stat_id} for {raw}.")
+            continue
+        if cited and not _is_cited_year(token, cited, ev) and not any(
+                token in source.numbers and _supported(source, item, cited) for source in ev.sources):
             issues.append(_unbound_number(raw, token, item, cited, ev))
     return issues
 
@@ -485,6 +675,21 @@ def _check_sample_sizes(item: Item, ev: Evidence) -> list[str]:
     """
     issues, cited = [], set(_cited(item))
     quoted = number_tokens(SAMPLE_SIZE_PATTERN.sub(" ", item.text))
+    cited_stats = [ev.stats[sid] for sid in item.source_ids
+                   if sid in ev.stats and ev.stats[sid].n]
+    used = [stat for stat in cited_stats if _display_token(stat.display) in quoted]
+    # A narrative describing a cited sample need not repeat its median. Bind n to
+    # that exact statistic, never to a broader sector tool response sharing IDs.
+    if not used:
+        used = cited_stats
+    if used:
+        for count in dict.fromkeys(SAMPLE_SIZE_PATTERN.findall(item.text)):
+            if any(stat.n == count for stat in used):
+                continue
+            shown = "; ".join(f"{stat.stat_id} has n={stat.n}" for stat in used)
+            issues.append(f"{item.location}: n={count} is not the sample size of the cited "
+                          f"statistic ({shown}). Copy the n stored on that statistic.")
+        return issues
     supported = {p for s in ev.sources if _supported(s, item, cited) for p in s.sample_sizes}
     quoted_pairs = {p for p in supported if p[0] in quoted}
     for count in dict.fromkeys(SAMPLE_SIZE_PATTERN.findall(item.text)):
@@ -502,17 +707,28 @@ def _check_sample_sizes(item: Item, ev: Evidence) -> list[str]:
     return issues
 
 
+def _owns_stat(ev: Evidence, stat_id: str) -> bool:
+    """True when the statistic is this buyer's profile or ranking signal."""
+    key = slug(ev.acquirer_key)
+    return stat_id.startswith(f"ST-PROFILE-{key}-") or stat_id.startswith(f"ST-RANK-{key}-")
+
+
 def _check_buyer_ids(item: Item, ev: Evidence) -> list[str]:
     """Overview and fit statements rest on this buyer's deals; precedents are its deals only."""
     cited = _cited(item)
     if item.section not in BUYER_SECTIONS or not cited:
         return []
     if item.section == "precedent_activity":
-        return [f"{item.location}: cites {tid}, which is not this buyer's deal "
-                f"({ev.deals[tid].acquirer} / {ev.deals[tid].target}). Precedents must be "
-                f"{ev.display_name}'s own deals: remove it, or move comparison deals to "
-                "valuation_context." for tid in cited if tid in ev.deals and tid not in ev.buyer_ids]
-    if ev.buyer_ids.isdisjoint(cited):
+        issues = [f"{item.location}: cites {tid}, which is not this buyer's deal "
+                  f"({ev.deals[tid].acquirer} / {ev.deals[tid].target}). Precedents must be "
+                  f"{ev.display_name}'s own deals: remove it, or move comparison deals to "
+                  "valuation_context." for tid in cited if tid in ev.deals and tid not in ev.buyer_ids]
+        issues += [f"{item.location}: cites {tid}, which is not {ev.display_name}'s own "
+                   f"statistic. Precedents must be {ev.display_name}'s own deals."
+                   for tid in cited if tid in ev.stats and not _owns_stat(ev, tid)]
+        return issues
+    own = [tid for tid in cited if ID_PATTERN.fullmatch(tid)]
+    if ev.buyer_ids.isdisjoint(own) and not any(_owns_stat(ev, tid) for tid in cited):
         return [f"{item.location}: cites only comps or other buyers' deals "
                 f"({_id_list(cited)}). Cite at least one of {ev.display_name}'s own deals (from "
                 "get_acquirer_profile, get_acquirer_deals or the ranking entry), or move the "
@@ -607,9 +823,12 @@ def _check_names(item: Item, ev: Evidence) -> list[str]:
     return issues
 
 
-def _check_unknown(item: Item) -> list[str]:
+def _check_unknown(item: Item, ev: Evidence) -> list[str]:
+    """Unknowns carry no citations. Numbers from the target block are allowed."""
     issues = []
-    numbers = list(dict.fromkeys(_number_matches(item.text)))
+    target = _target_tokens(ev)
+    numbers = [raw for raw in dict.fromkeys(_number_matches(item.text))
+               if raw.replace(",", "") not in target]
     if numbers:
         issues.append(f"{item.location}: unknown statements must not contain numbers (found "
                       f"{', '.join(numbers)}). Remove them, or make it a cited fact.")
@@ -623,7 +842,7 @@ def _check_unknown(item: Item) -> list[str]:
 def _check_item(item: Item, evidence: Evidence) -> list[str]:
     """Statement-level checks. Section rules apply only to report sections."""
     if item.kind == "unknown":
-        issues = _check_unknown(item)
+        issues = _check_unknown(item, evidence)
     else:
         issues = (_check_citations(item, evidence) + _check_buyer_ids(item, evidence)
                   + _check_numbers(item, evidence) + _check_sample_sizes(item, evidence)
@@ -634,9 +853,20 @@ def _check_item(item: Item, evidence: Evidence) -> list[str]:
 
 def check(report: BuyerReport, evidence: Evidence) -> list[str]:
     """Every guardrail problem in the report, as fix-oriented messages. Empty list = pass."""
+    if report.draft is None:
+        return [report.error or "This buyer has no report."]
     issues = _check_structure(report, evidence)
     for item in _items(report.draft):
         issues += _check_item(item, evidence)
+    direct = next((stat for sid, stat in evidence.stats.items()
+                   if sid.endswith("-direct_closed_count")
+                   and sid.startswith("ST-RANK-")), None)
+    if direct and direct.display.isdigit() and int(direct.display) > 0:
+        for item in _items(report.draft):
+            if re.search(r"adjacent[- ]only", item.text, re.I):
+                issues.append(f"{item.location}: 'adjacent-only' contradicts the recorded direct "
+                              "sector precedents. Use 'limited direct-sector evidence' or describe "
+                              "the actual mix, with its sources.")
     return issues
 
 
@@ -647,13 +877,15 @@ def build_answer_evidence(target: dict, entries: list[dict], tool_results: list[
     results of this answer's tool calls. No buyer owns the answer, so every buyer name must
     belong to a cited deal and no source is limited to one section."""
     results = [call["result"] for call in tool_results]
-    text = "\n".join(_texts([target, entries, results]))
-    sources, figures = [], {}
-    _walk(target, frozenset(), "target", "", sources, figures)
+    text = "\n".join(_texts([target, entries, results, {"reported_buyer_count": str(len(entries))}]))
+    sources, figures, stats = [], {}, {}
+    _walk(target, frozenset(), "target", "", sources, figures, stats)
+    # The number of supplied buyers is structural context, not a deal statistic.
+    _walk({"reported_buyer_count": str(len(entries))}, frozenset(), "target", "", sources, figures, stats)
     for entry in entries:
         ids = frozenset(entry.get("supporting_closed_ids", []) + entry.get("weak_signal_ids", []))
-        _walk(entry, ids, "buyer", entry["acquirer_key"], sources, figures)
-    _walk(results, frozenset(), "comp", "", sources, figures)
+        _walk(entry, ids, "buyer", entry["acquirer_key"], sources, figures, stats)
+    _walk(results, frozenset(), "comp", "", sources, figures, stats)
     return Evidence(
         acquirer_key="", display_name="", starting_level="",
         allowed_ids=frozenset(ID_PATTERN.findall(text)),
@@ -662,7 +894,8 @@ def build_answer_evidence(target: dict, entries: list[dict], tool_results: list[
         outcomes=_outcomes(), sources=tuple(sources),
         buyer_ids=frozenset(i for s in sources if s.kind == "buyer" for i in s.ids),
         own_names=frozenset(), target_names=frozenset(company_names("\n".join(_texts(target)))),
-        figures=figures, deals=_deals(),
+        figures=figures, deals=_deals(), stats=stats,
+        deal_numbers=_deal_number_index(sources),
     )
 
 
@@ -691,13 +924,20 @@ def check_answer(statements: list[Statement], evidence: Evidence) -> list[str]:
     return check_statements(statements, evidence)
 
 
-def render_answer(statements: list[Statement], status: str, issues: list[str]) -> str:
-    """A follow-up answer as Markdown. Citation tags come from source_ids only."""
+def render_answer(statements: list[Statement], status: str, issues: list[str],
+                  numbers: dict | None = None) -> str:
+    """A follow-up answer as Markdown.
+
+    `numbers` is the run's `{source_id: citation number}` map. An id that is already
+    in the map is shown as `[n]`. An id with no number is shown as `[id]`, so a
+    number is never printed without a registry entry. Follow-ups do not renumber
+    sources that already appeared in the run; new ids are appended by `extend_sources`.
+    """
     lines = [f"**Status:** {'Verified' if status == 'verified' else 'Not verified'}"]
     if status != "verified":
         lines += ["", "> **Not verified.** This answer did not pass the guardrail checks:",
                   *[f"> - {issue}" for issue in issues]]
-    lines += ["", *[f"- {_line(s.text, s.kind, s.source_ids)}" for s in statements]]
+    lines += ["", *[f"- {_line(s.text, s.kind, s.source_ids, numbers)}" for s in statements]]
     return "\n".join(lines) + "\n"
 
 
@@ -710,6 +950,8 @@ def apply_check(report: BuyerReport, evidence: Evidence) -> BuyerReport:
 
 def length_warnings(report: BuyerReport) -> list[str]:
     """Length notes for a roughly one-page report. Warnings only, never failures."""
+    if report.draft is None:
+        return []
     items = _items(report.draft)
     warnings = [f"{item.location}: {len(item.text.split())} words; keep statements under "
                 f"{MAX_STATEMENT_WORDS}." for item in items
@@ -722,18 +964,41 @@ def length_warnings(report: BuyerReport) -> list[str]:
 
 # ---------- rendering ----------
 
-def _line(text: str, kind: str, ids: list[str]) -> str:
+def citation_marker(source_id: str, numbers: dict | None = None) -> str:
+    """`[n]` when the run has assigned `n` to this id, otherwise the id itself in brackets."""
+    if numbers and source_id in numbers:
+        return f"[{numbers[source_id]}]"
+    return f"[{source_id}]"
+
+
+def _line(text: str, kind: str, ids: list[str], numbers: dict | None = None) -> str:
     label = {"interpretation": "*Interpretation:* ", "unknown": "*Unknown:* "}.get(kind, "")
-    tags = " ".join(f"[{tid}]" for tid in dict.fromkeys(ids))
+    tags = " ".join(citation_marker(tid, numbers) for tid in dict.fromkeys(ids))
     return f"{label}{text}" + (f" {tags}" if tags else "")
 
 
+def _paragraph(statements, numbers: dict | None = None) -> str:
+    """Checked statements joined into one paragraph, each with its citation markers."""
+    parts = []
+    for statement in statements:
+        text = statement.text if hasattr(statement, "text") else statement
+        kind = statement.kind if hasattr(statement, "kind") else "fact"
+        ids = statement.source_ids if hasattr(statement, "source_ids") else []
+        label = {"interpretation": "Interpretation: ", "unknown": "Unknown: "}.get(kind, "")
+        tags = " ".join(citation_marker(tid, numbers) for tid in dict.fromkeys(ids))
+        parts.append(f"{label}{text}" + (f" {tags}" if tags else ""))
+    return " ".join(parts)
+
+
 def _status_label(report: BuyerReport) -> str:
-    return "Verified" if report.status == "verified" else "Not verified"
+    return {"verified": "Verified", "failed": "Failed"}.get(report.status, "Not verified")
 
 
 def render_markdown(report: BuyerReport) -> str:
     """One-page Markdown report. Citation tags come from source_ids only."""
+    if report.draft is None:
+        return (f"## {report.rank}. {report.display_name}\n\n**Status:** Failed\n\n"
+                f"{report.error or 'Research failed before a report was written.'}\n")
     draft, conviction = report.draft, report.draft.conviction
     lines = [
         f"## {report.rank}. {report.display_name}",
@@ -744,9 +1009,13 @@ def render_markdown(report: BuyerReport) -> str:
     ]
     if report.selection_note:
         lines += ["", f"*Selection note:* {report.selection_note}"]
+    if report.status == "failed":
+        lines += ["", report.error or "Research failed before a report was written."]
+        return "\n".join(lines) + "\n"
     if report.status != "verified":
         lines += ["", "> **Not verified.** This report did not pass the guardrail checks:",
                   *[f"> - {issue}" for issue in report.issues]]
+    lines += ["", _line(draft.summary.text, draft.summary.kind, draft.summary.source_ids)]
     for section in SECTIONS:
         lines += ["", f"### {SECTION_TITLES[section]}",
                   *[f"- {_line(s.text, s.kind, s.source_ids)}" for s in getattr(draft, section)]]
@@ -758,13 +1027,205 @@ def render_markdown(report: BuyerReport) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_run_markdown(reports: list[BuyerReport]) -> str:
-    """All reports, after a summary table."""
-    rows = [f"| {r.rank} | {r.display_name} | {r.acquirer_type} | {r.draft.conviction.level} | "
-            f"{_status_label(r)} |" for r in reports]
-    header = ["# Buyer reports", "", "| Rank | Buyer | Type | Conviction | Status |",
-              "|---|---|---|---|---|", *rows, ""]
-    return "\n".join(header) + "\n---\n\n" + "\n---\n\n".join(map(render_markdown, reports))
+def _ordered(reports: list[BuyerReport]) -> list[BuyerReport]:
+    return sorted(reports, key=lambda report: report.rank)
+
+
+def citation_ids(reports: list[BuyerReport]):
+    """Source ids in citation order: summaries by rank, then each report's sections."""
+    ordered = _ordered(reports)
+    for report in ordered:
+        if report.draft is not None:
+            yield from report.draft.summary.source_ids
+    for report in ordered:
+        draft = report.draft
+        if draft is None:
+            continue
+        for section in SECTIONS:
+            for statement in getattr(draft, section):
+                yield from statement.source_ids
+        for flag in draft.risk_flags:
+            yield from flag.source_ids
+        yield from draft.conviction.source_ids
+
+
+def _source_record(source_id: str) -> tuple[str, dict] | None:
+    """`(kind, record)` for a deal or statistic id, or None when it cannot be resolved."""
+    client = get_client()
+    if ID_PATTERN.fullmatch(source_id):
+        record = client.deal_record(source_id)
+        return ("deal", record) if record else None
+    if STAT_ID_PATTERN.fullmatch(source_id):
+        record = client.stat_record(source_id)
+        return ("statistic", record) if record else None
+    return None
+
+
+def build_sources(reports: list[BuyerReport], ranking: dict | None = None) -> dict:
+    """Citation numbers for one run, in order of first appearance.
+
+    Returns `{"numbers": {source_id: number}, "entries": [{number, id, kind, record}]}`.
+    `kind` is `deal` (the full processed CSV row) or `statistic` (the registry record).
+    An id with no record is left out, so every number has an entry. Call with the
+    run's ranking dict so `ST-RANK-` ids resolve.
+    """
+    if ranking is not None:
+        get_client().note_ranking(ranking)
+    numbers, entries = {}, []
+    for source_id in citation_ids(reports):
+        if source_id in numbers:
+            continue
+        found = _source_record(source_id)
+        if found is None:
+            continue
+        kind, record = found
+        number = len(entries) + 1
+        numbers[source_id] = number
+        entries.append({"number": number, "id": source_id, "kind": kind, "record": record})
+    return {"numbers": numbers, "entries": entries}
+
+
+def extend_sources(sources: dict, statements: list[Statement],
+                   ranking: dict | None = None) -> dict:
+    """The same registry, with new ids from a follow-up appended after the last number.
+
+    Numbers already assigned are kept. An id the registry cannot resolve is not
+    given a number. Follow-up answers use this map; they do not start again at 1.
+    """
+    if ranking is not None:
+        get_client().note_ranking(ranking)
+    numbers = dict(sources.get("numbers") or {})
+    entries = [dict(entry) for entry in sources.get("entries") or []]
+    next_number = max(numbers.values(), default=0)
+    for statement in statements:
+        for source_id in statement.source_ids:
+            if source_id in numbers:
+                continue
+            found = _source_record(source_id)
+            if found is None:
+                continue
+            kind, record = found
+            next_number += 1
+            numbers[source_id] = next_number
+            entries.append({"number": next_number, "id": source_id, "kind": kind, "record": record})
+    return {"numbers": numbers, "entries": entries}
+
+
+def _source_prose(entry: dict) -> str:
+    record = entry["record"]
+    if entry["kind"] == "deal":
+        fields = [
+            ("Target", record.get("target_company")),
+            ("Acquirer", record.get("acquirer")),
+            ("Year", record.get("deal_year")),
+            ("Sector", record.get("sector")),
+            ("Deal type", record.get("deal_type")),
+            ("Outcome", record.get("outcome")),
+            ("Deal size ($M)", record.get("deal_size_mm")),
+            ("EV/EBITDA", record.get("ev_ebitda_multiple")),
+            ("EV/Revenue", record.get("ev_revenue_multiple")),
+            ("Geography", record.get("geography")),
+        ]
+        detail = "; ".join(f"{label}: {value}" for label, value in fields if value not in (None, ""))
+        return f"Deal. {detail}."
+    filters = ", ".join(f"{key}={value}" for key, value in (record.get("filters") or {}).items())
+    supporting = ", ".join(record.get("source_ids") or []) or "none"
+    return (f"Statistic. {record.get('calculation')}. Filters: {filters}. "
+            f"n={record.get('n')}. Value: {record.get('display')}. "
+            f"Supporting IDs: {supporting}.")
+
+
+def _target_line(target) -> str:
+    if target is None:
+        return ""
+    if hasattr(target, "sector"):
+        sector, ev, ownership = target.sector, target.ev_mm, target.ownership
+        geography, margin = target.geography, target.margin_profile
+    else:
+        sector, ev = target.get("sector"), target.get("ev_mm")
+        ownership, geography = target.get("ownership"), target.get("geography")
+        margin = target.get("margin_profile")
+    shown = fmt_money(ev) if isinstance(ev, (int, float)) else ev
+    return (f"Target: {sector}, enterprise value {shown}, {ownership}, {geography}, "
+            f"{margin} margins.")
+
+
+def render_narrative(reports: list[BuyerReport], target=None, ranking: dict | None = None,
+                     sources: dict | None = None) -> str:
+    """The full narrative document written to `reports.md`.
+
+    Executive summary, ranked shortlist, each buyer's summary sentence and six
+    sections as paragraphs with `[n]` markers, the verification status, and a
+    numbered Sources appendix. Prose is the checked statement text only. A failed
+    buyer keeps its rank and shows the error, with no report body.
+    """
+    sources = sources or build_sources(reports, ranking)
+    numbers = sources["numbers"]
+    ordered = _ordered(reports)
+    produced = [report for report in ordered if report.draft is not None]
+    mix = Counter(report.draft.conviction.level for report in produced)
+    verified = sum(report.status == "verified" for report in ordered)
+    not_verified = sum(report.status == "not_verified" for report in ordered)
+    failed = sum(report.status == "failed" for report in ordered)
+    lines = ["# Buyer reports", "", "## Executive summary", ""]
+    target_line = _target_line(target)
+    if target_line:
+        lines += [target_line, ""]
+    lines += [
+        f"{len(ordered)} buyers researched. {len(produced)} reports written. "
+        f"Verified {verified}. Not verified {not_verified}. Failed {failed}.",
+        "Conviction: " + ", ".join(f"{level} {mix.get(level, 0)}"
+                                   for level in ("High", "Medium", "Low")) + ".",
+        "",
+    ]
+    for report in ordered[:3]:
+        if report.draft is None:
+            lines.append(f"**{report.rank}. {report.display_name}.** Failed. "
+                         f"{report.error or ''}".rstrip())
+        else:
+            lines.append(f"**{report.rank}. {report.display_name}.** ({_status_label(report)}) "
+                         f"{_paragraph([report.draft.summary], numbers)}")
+    lines += ["", "## Ranked shortlist", "",
+              "| Rank | Buyer | Type | Conviction | Verification |",
+              "|---|---|---|---|---|"]
+    for report in ordered:
+        level = report.draft.conviction.level if report.draft else "—"
+        lines.append(f"| {report.rank} | {report.display_name} | {report.acquirer_type} | "
+                     f"{level} | {_status_label(report)} |")
+    lines += ["", "## Buyer reports", ""]
+    for report in ordered:
+        lines += [f"## {report.rank}. {report.display_name}", "",
+                  f"**Verification:** {_status_label(report)}"]
+        if report.draft is None:
+            lines += ["", report.error or "Research failed before a report was written.", ""]
+            continue
+        lines.append(f"**Conviction:** {report.draft.conviction.level}")
+        if report.status != "verified":
+            lines += ["", f"> Not verified. {len(report.issues)} statement(s) could not be verified."]
+        lines += ["", _paragraph([report.draft.summary], numbers)]
+        for section in SECTIONS:
+            lines += ["", f"### {SECTION_TITLES[section]}", "",
+                      _paragraph(getattr(report.draft, section), numbers)]
+        lines += ["", "### Risk Flags", ""]
+        for flag in report.draft.risk_flags:
+            lines.append(_line(f"**{flag.risk}.** {flag.explanation}", flag.kind,
+                               flag.source_ids, numbers))
+        conviction = report.draft.conviction
+        lines += ["", "### Conviction", "",
+                  _line(f"**{conviction.level}.** {conviction.reason}", "fact",
+                        conviction.source_ids, numbers), ""]
+    lines += ["## Sources", ""]
+    for entry in sources["entries"]:
+        lines += [f"### [{entry['number']}] {entry['id']}", "", _source_prose(entry), ""]
+    if not sources["entries"]:
+        lines.append("No cited sources.")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_run_markdown(reports: list[BuyerReport], target=None,
+                        ranking: dict | None = None) -> str:
+    """`reports.md` for a run. See `render_narrative`."""
+    return render_narrative(reports, target, ranking, build_sources(reports, ranking))
 
 
 # ---------- run quality metrics ----------
@@ -779,22 +1240,40 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     return len(a & b) / len(a | b) if a | b else 0.0
 
 
-def quality_metrics(reports: list[BuyerReport]) -> dict:
-    """Run-level quality numbers and a pass/fail summary."""
+def _known_citation(tid: str, outcomes: dict[str, str]) -> bool:
+    if ID_PATTERN.fullmatch(tid):
+        return tid in outcomes
+    if STAT_ID_PATTERN.fullmatch(tid):
+        return get_client().stat_record(tid) is not None
+    return False
+
+
+def quality_metrics(reports: list[BuyerReport], ranking: dict | None = None) -> dict:
+    """Run-level quality numbers and a pass/fail summary.
+
+    `report_count` is how many buyers produced a report body (verified or not
+    verified). `failed` is the buyers whose research errored; they stay in rank
+    and are not counted as reports. Pass `ranking` (the `rank_acquirers` data)
+    so `ST-RANK-` ids resolve and are not counted as invalid citations.
+    """
+    if ranking is not None:
+        get_client().note_ranking(ranking)
     outcomes = _outcomes()
-    items = [item for r in reports for item in _items(r.draft)]
+    produced = [r for r in reports if r.draft is not None and r.status != "failed"]
+    items = [item for r in produced for item in _items(r.draft)]
     invalid = sorted({tid for item in items for tid in item.source_ids
-                      if not ID_PATTERN.fullmatch(tid) or tid not in outcomes})
+                      if not _known_citation(tid, outcomes)})
     invalid_count = sum(1 for item in items for tid in item.source_ids if tid in invalid)
     facts = [item for item in items if item.kind == "fact"]
     cited = sum(1 for item in facts if item.source_ids)
-    words = {r.acquirer_key: _fit_words(r) for r in reports}
+    words = {r.acquirer_key: _fit_words(r) for r in produced}
     pairs = sorted(((round(_jaccard(words[a], words[b]), 2), a, b)
                     for a, b in combinations(words, 2)), reverse=True)
-    conviction_mix = dict(Counter(r.draft.conviction.level for r in reports))
-    not_verified = [r.acquirer_key for r in reports if r.status != "verified"]
+    conviction_mix = dict(Counter(r.draft.conviction.level for r in produced))
+    not_verified = [r.acquirer_key for r in reports if r.status == "not_verified"]
+    failed = [r.acquirer_key for r in reports if r.status == "failed"]
     summary = {
-        "full_report_count": len(reports) >= config.REPORT_COUNT,
+        "full_report_count": len(produced) >= config.REPORT_COUNT,
         "all_reports_verified": not not_verified,
         "no_invalid_citations": invalid_count == 0,
         "all_facts_cited": cited == len(facts),
@@ -802,7 +1281,9 @@ def quality_metrics(reports: list[BuyerReport]) -> dict:
         "no_similar_pairs": not any(s > SIMILARITY_THRESHOLD for s, _, _ in pairs),
     }
     return {
-        "report_count": len(reports),
+        "report_count": len(produced),
+        "failed_count": len(failed),
+        "failed": failed,
         "required_report_count": config.REPORT_COUNT,
         "invalid_citation_count": invalid_count,
         "invalid_citation_ids": invalid,
@@ -840,6 +1321,7 @@ def _mix(counts: dict) -> str:
 
 def print_metrics(run: dict, metrics: dict) -> None:
     print(f"Run {run['run_id']}: {metrics['report_count']} reports")
+    print(f"Failed buyers: {metrics['failed_count']} {metrics['failed'] or ''}".rstrip())
     print(f"Invalid citations: {metrics['invalid_citation_count']} "
           f"{metrics['invalid_citation_ids'] or ''}".rstrip())
     print(f"Reports not verified: {len(metrics['not_verified'])} "
@@ -859,7 +1341,8 @@ def _fail_reason(metrics: dict) -> str:
     """One line naming every failed check, with the counts for the report checks."""
     reasons = {
         "full_report_count": f"{metrics['report_count']} of {metrics['required_report_count']} "
-                             "reports",
+                             "reports"
+                             + (f"; {metrics['failed_count']} failed" if metrics["failed_count"] else ""),
         "all_reports_verified": f"{len(metrics['not_verified'])} report(s) not verified",
     }
     return "; ".join(reasons.get(name, name) for name, ok in metrics["summary"].items() if not ok)
@@ -872,7 +1355,9 @@ def main() -> None:
               "Run the engine first (make run).")
         raise SystemExit(1)
     run, reports = load_reports(run_dir)
-    metrics = quality_metrics(reports)
+    ranking_path = run_dir / "ranking.json"
+    ranking = json.loads(ranking_path.read_text(encoding="utf-8")) if ranking_path.is_file() else None
+    metrics = quality_metrics(reports, ranking)
     print_metrics(run, metrics)
     if not metrics["passed"]:
         raise SystemExit(1)

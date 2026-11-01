@@ -43,7 +43,8 @@ def test_full_run_saves_ten_reports_trace_and_server_log(runs_dir, monkeypatch):
 
     run_dir = runs_dir / run["run_id"]
     assert sorted(p.name for p in run_dir.iterdir()) == [
-        "mcp_server.log", "ranking.json", "reports.json", "reports.md", "trace.json"]
+        "mcp_server.log", "ranking.json", "reports.json", "reports.md", "sources.json",
+        "trace.json"]
     assert not list(runs_dir.glob(".mcp_server-*"))
     saved, loaded = guardrails.load_reports(run_dir)
     assert loaded == reports and saved["target"] == config.DEFAULT_TARGET
@@ -112,23 +113,24 @@ def test_tool_failures_go_back_to_the_model_and_the_run_completes(runs_dir, monk
         assert "limit" in errors["get_acquirer_deals"]
 
 
-def test_one_buyer_failure_is_substituted_and_saved(runs_dir, monkeypatch):
+def test_one_buyer_failure_stays_in_place(runs_dir, monkeypatch):
     run, events = stdio_run(monkeypatch, FakeLLM(committee=committee_policy({}),
                                                  fail_keys={"gtcr"}))
-    keys = [r.acquirer_key for r in run["reports"]]
-    assert len(keys) == config.REPORT_COUNT and "gtcr" not in keys
+    reports = {r.acquirer_key: r for r in run["reports"]}
+    assert len(reports) == config.REPORT_COUNT and reports["gtcr"].status == "failed"
+    assert reports["gtcr"].draft is None and "provider error" in reports["gtcr"].error
     trace = saved_trace(run)
-    [sub] = trace["substitutions"]
-    assert sub["failed"] == "gtcr" and sub["replacement"] == keys[-1]
+    assert trace["substitutions"] == []
     assert trace["errors"][0]["partial_trace"]["tool_calls"]
     markdown = (runs_dir / run["run_id"] / "reports.md").read_text()
-    assert "Replaced GTCR after an error" in markdown
-    assert any(e["message"].startswith("Substituting") for e in events)
+    assert "GTCR" in markdown and "Failed" in markdown
+    assert "Replaced GTCR" not in markdown
+    assert any(e["name"] == "buyer_failed" and e["acquirer_key"] == "gtcr" for e in events)
 
 
 def test_malformed_model_output(runs_dir, monkeypatch, capsys):
     """A draft that breaks the rules twice ends 'Not verified' and is still shown and saved.
-    Output that is not JSON at all after repair is a buyer error, so that buyer is replaced."""
+    Output that is not JSON at all after repair is a buyer error, so that buyer stays failed."""
     def write(messages):
         key = buyer_key(messages)
         return {"nordic capital": bad_draft(messages), "gtcr": "{not json"}.get(
@@ -136,7 +138,8 @@ def test_malformed_model_output(runs_dir, monkeypatch, capsys):
 
     run, _ = stdio_run(monkeypatch, FakeLLM(write=write, committee=committee_policy({})))
     reports = {r.acquirer_key: r for r in run["reports"]}
-    assert len(reports) == config.REPORT_COUNT and "gtcr" not in reports
+    assert len(reports) == config.REPORT_COUNT and reports["gtcr"].status == "failed"
+    assert reports["gtcr"].draft is None
     nordic = reports["nordic capital"]
     assert nordic.status == "not_verified"
     assert any("does not appear in the tool results" in i for i in nordic.issues)
@@ -144,7 +147,7 @@ def test_malformed_model_output(runs_dir, monkeypatch, capsys):
     assert "ReportError" in trace["errors"][0]["error"]
     assert trace["quality"]["not_verified"] == ["nordic capital"]
     markdown = (runs_dir / run["run_id"] / "reports.md").read_text()
-    assert "> **Not verified.**" in markdown
+    assert "> Not verified." in markdown
     with pytest.raises(SystemExit):
         guardrails.main()
     assert "1 report(s) not verified" in capsys.readouterr().out

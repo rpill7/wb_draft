@@ -57,10 +57,9 @@ Kind = Literal["fact", "interpretation", "unknown"]
 Level = Literal["High", "Medium", "Low"]
 MAX_STATEMENTS = 5
 MAX_RISK_FLAGS = 4
-MAX_ANSWER_STATEMENTS = 6
 
-_IDS = ("Transaction IDs (e.g. MA-2021-0142) from the tool results that support this. "
-        "At least one for a fact; empty for unknown.")
+_IDS = ("MA- transaction IDs for a deal's own figures, or ST- statistic IDs for a calculated "
+        "figure (the stat_id beside its display). At least one for a fact; empty for unknown.")
 _KIND = ("fact = stated in the tool results (cite IDs); interpretation = your reasoning from "
          "the facts; unknown = the data cannot answer it (no numbers, no IDs).")
 
@@ -95,10 +94,17 @@ class Conviction(BaseModel):
 
 
 class ReportDraft(BaseModel):
-    """What the writer produces for one buyer. Python adds identity, status and issues."""
+    """What the writer produces for one buyer. Python adds identity, status and issues.
+
+    `summary` is one sentence: this buyer's thesis. It is checked like every other
+    statement. The six sections stay lists of statements. Python joins each list
+    into a paragraph, so the prose is the checked sentences.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
+    summary: Statement = Field(description="One sentence, at most 40 words: why this buyer "
+                                           "belongs on the list. Cite MA- or ST- ids.")
     acquirer_overview: list[Statement] = Field(
         max_length=MAX_STATEMENTS, description="Who the buyer is in this dataset: type, deal "
                                                "count, sectors, typical deal size.")
@@ -151,8 +157,10 @@ class FollowupAnswer(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    include_source_catalog: bool = Field(default=False, description="True when the user requests a list of all report sources. Python appends the complete saved catalog; do not squeeze it into prose.")
+
     statements: list[Statement] = Field(
-        max_length=MAX_ANSWER_STATEMENTS, description="The answer, one claim per statement. If "
+        description="The complete answer, one claim per statement. Use as many statements as the question requires. If "
                                                       "the data cannot answer the question, one "
                                                       "unknown statement saying so.")
 
@@ -166,6 +174,7 @@ class FollowupResult(BaseModel):
     """
 
     question: str
+    source_catalog: list[dict] = Field(default_factory=list)
     statements: list[Statement]
     status: Literal["verified", "not_verified"]
     issues: list[str]
@@ -175,7 +184,11 @@ class FollowupResult(BaseModel):
 
 
 class RequestFields(BaseModel):
-    """What a banker's request sentence states about the target. null = not stated."""
+    """What a banker's request sentence states about the target. null = not stated.
+
+    `title` is a short name for the request, for the history list only. It is not
+    part of the target, and a missing or unusable title does not reject the parse.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -190,10 +203,44 @@ class RequestFields(BaseModel):
                     "named; null if the sentence says nothing about geography.")
     margin_profile: Literal["strong", "any"] | None = Field(
         description="strong if the sentence asks for strong or above-median EBITDA margins.")
+    title: str | None = Field(
+        default=None,
+        description="Optional plain-text name for this request: 3 to 6 words, sentence case, "
+                    "under 45 characters. No valuation, date, Markdown, quotes, emoji, or "
+                    "trailing punctuation. Null when the request does not support a specific name.")
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _title_text_or_empty(cls, value):
+        """A non-text title is dropped. It must not fail the rest of the parse."""
+        if value is None or isinstance(value, str):
+            return value
+        return None
+
+    @classmethod
+    def model_json_schema(cls, *args, **kwargs):
+        """Ask the model for `title`, and still accept older JSON that omits it.
+
+        Strict mode wants every property listed as required and rejects `default`.
+        The Python field keeps its default, so a saved response without `title` still loads.
+        """
+        schema = super().model_json_schema(*args, **kwargs)
+        prop = schema.get("properties", {}).get("title")
+        if isinstance(prop, dict):
+            prop.pop("default", None)
+        required = schema.setdefault("required", [])
+        if "title" not in required:
+            required.append("title")
+        return schema
 
 
 class BuyerReport(BaseModel):
-    """A checked report. Identity comes from the ranking entry; status and issues from Python."""
+    """A checked report. Identity comes from the ranking entry; status and issues from Python.
+
+    `status` is `verified`, `not_verified` (a report that failed the checks) or `failed`
+    (research raised an error). A failed buyer keeps its rank. `draft` is null and
+    `error` holds the message. There is no report body and no substitute buyer.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -205,9 +252,10 @@ class BuyerReport(BaseModel):
     score: str
     selection_note: str | None = None
     starting_level: Level
-    draft: ReportDraft
-    status: Literal["verified", "not_verified"]
+    draft: ReportDraft | None = None
+    status: Literal["verified", "not_verified", "failed"]
     issues: list[str]
+    error: str | None = None
 
     @classmethod
     def from_ranking(cls, entry: dict, draft: ReportDraft) -> "BuyerReport":

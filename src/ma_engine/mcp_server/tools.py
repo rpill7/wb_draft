@@ -13,7 +13,7 @@ tests call the tool functions directly.
 from typing import Literal
 
 from ma_engine import ranking
-from ma_engine.clients.data_client import get_client
+from ma_engine.clients.data_client import get_client, sector_stat_id
 from ma_engine.config import DEFAULT_TARGET, SHORTLIST_SIZE
 from ma_engine.models import Target
 from ma_engine.prepare import (
@@ -85,7 +85,8 @@ def _deal_result(frame, limit: int, empty_message: str, extra_warnings: list[str
                         "Narrow the filters or raise limit (max 25) to see more.")
     if not shown["is_closed"].all():
         warnings.append(NOT_CLOSED_WARNING)
-    return _result({"deals": rows, "returned": len(rows)}, [r["transaction_id"] for r in rows],
+    return _result({"deals": rows, "returned": len(rows), "total_matches": len(frame),
+                    "truncated": len(frame) > len(rows)}, [r["transaction_id"] for r in rows],
                    warnings)
 
 
@@ -151,24 +152,16 @@ def get_sector_overview(sector: str) -> dict:
     """
     _check("sector", sector, SECTORS)
     row = get_client().sector_stats_row(sector)
+    points = get_client().sector_points(sector)
     data = {
         "sector": sector,
         "basis": "All deals in the sector (any outcome) unless the field says closed.",
-        "deal_count": _count(row["deal_count"], row["source_ids"]),
-        "closed_count": _count(row["closed_count"], row["closed_source_ids"]),
-        "median_deal_size": {"value": row["median_deal_size_mm"],
-                             "display": row["median_deal_size_display"]},
-        "ebitda_margin_median": {"value": row["ebitda_margin_median"],
-                                 "display": row["ebitda_margin_median_display"],
-                                 "n": row["ebitda_margin_count"]},
-        "ebitda_margin_p75": {"value": row["ebitda_margin_p75"],
-                              "display": row["ebitda_margin_p75_display"],
-                              "n": row["ebitda_margin_count"]},
-        "financial_sponsor_count": _count(row["financial_sponsor_count"],
-                                          row["financial_sponsor_source_ids"]),
-        "financial_sponsor_share": {"value": row["financial_sponsor_share_pct"],
-                                    "display": row["financial_sponsor_share_display"]},
-        "top_deal_types": row["top_deal_types"],
+        **points,
+        "top_deal_types": [
+            item if not item.get("display") else {
+                **item, "stat_id": sector_stat_id(sector, "deal_type", item["deal_type"])}
+            for item in row["top_deal_types"]
+        ],
         "other_sectors": [
             {"sector": s["sector_b"], "is_adjacent": s["is_adjacent"],
              "assumption": {"closeness": s["closeness"],
@@ -198,7 +191,7 @@ def get_acquirer_profile(acquirer_key: str) -> dict:
             field in deal rows). Case and extra spaces are ignored.
     """
     key = _resolve_acquirer(acquirer_key)
-    profile = get_client().profile(key)
+    profile = get_client().annotated_profile(key)
     warnings = []
     for outcome, stat in profile["non_closed_by_outcome"].items():
         if stat["value"]:
@@ -261,15 +254,7 @@ def get_valuation_comps(sector: str,
     _check("scope", scope, SCOPES)
     _check("size_band", size_band, SIZE_BAND_LABELS + [ALL_SIZES])
     row = get_client().comps_row(sector, scope, size_band)
-
-    def distribution(prefix: str) -> dict:
-        return {
-            "sample_size": _count(row[f"{prefix}_count"]),
-            **{name: {"value": row[f"{prefix}_{name}"], "display": row[f"{prefix}_{name}_display"]}
-               for name in ["p25", "median", "p75"]},
-            "source_ids": row[f"{prefix}_source_ids"],
-        }
-
+    block = get_client().comps_block(sector, scope, size_band)
     data = {
         "sector": sector,
         "scope": scope,
@@ -277,11 +262,7 @@ def get_valuation_comps(sector: str,
         "sectors_included": row["sectors_included"],
         "basis": "Closed deals only, stated multiples as given in the data.",
         "closed_deal_count": _count(row["deal_count"]),
-        "ev_ebitda": distribution("ev_ebitda"),
-        "ev_revenue": distribution("ev_revenue"),
-        "ebitda_margin_median": {"value": row["ebitda_margin_median"],
-                                 "display": row["ebitda_margin_median_display"],
-                                 "sample_size": _count(row["ebitda_margin_count"])},
+        **block,
     }
     warnings = []
     if row["deal_count"] == 0:
@@ -342,12 +323,12 @@ def rank_acquirers(sector: str = DEFAULT_TARGET["sector"],
     contribution and a ready-to-quote explanation with source IDs, a starting conviction
     (High, Medium or Low) with the rule that produced it, the supporting closed-deal IDs,
     weak-signal IDs (deals that did not close; never describe them as completed) and warnings.
-    The first 10 places hold at least 3 Financial Sponsors and 3 Strategics when the pool has
-    them (buyers with a closed target-sector deal are promoted first), and the places after
-    the first 10 hold at least one buyer of each type as reserves: `rank` is the final position,
-    `score_rank` the position by score alone, and any promoted, displaced or reserve-added
-    buyer carries a `selection_note`. Also returns the target as
-    understood, the candidate count, the conviction score bars and the buyer-type mix.
+    The shortlist and reserves follow score order; buyer type does not reserve places.
+    Up to three strategic alternatives outside the top 10 are returned separately, without
+    displacing higher-scoring buyers. `rank` is the returned position and `score_rank` the
+    position by score. Also returns the target as understood, candidate count, conviction
+    score bars and buyer-type mix. Historical saved runs may contain selection notes from
+    the former buyer-type coverage policy.
     Omit every argument to rank the default target.
 
     Args:

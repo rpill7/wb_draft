@@ -6,19 +6,10 @@
 **Dependency:** Subplan 5 complete and verified.
 
 ## Goal
-Give the reviewer one command to run the full engine in Streamlit, see the 10 reports, click through to the source rows, and see how each decision was made. Then finish the README, sample output, quality check, and demo. The assignment values evidence and prompt quality over visual polish, so keep the interface plain and clear.
+Give the reviewer one command to run the full engine in Streamlit, see the 10 reports, open a citation, and see how each decision was made. Then finish the README, sample output, quality check, and demo. The screen itself is specified in Subplan 9. The assignment values evidence and prompt quality over visual polish, so keep the interface plain and clear.
 
 ## Steps
-1. **`src/ma_engine/app.py` (Streamlit), started by `make run`.**
-   - **Sidebar form:** sector (from the data), EV in $M, geography (regions from the data plus "Any region"), ownership, margin profile. Defaults come from `config.py`. Validate inputs.
-   - **Buttons:** Run, and Regenerate (calls `run_engine(..., use_cache=False)`).
-   - **Live progress** with `st.status`: ranking, each buyer's tool calls, guardrail results, committee review.
-   - **Ranked table:** rank, buyer, type, score, conviction, and status (verified or not verified).
-   - **Per-buyer section:** the rendered six-section report; citation IDs shown so the user can open a table of the original CSV rows they point to; the score breakdown; any "Not verified" banner with its issues.
-   - **"How this was decided":** the trace for that buyer (tool calls in order, arguments, durations) and run totals (time, tokens, cost, cache hits).
-   - **"Not relevant" button** per buyer (stretch goal): re-runs with that buyer excluded; the cache makes the other nine instant.
-   - **Downloads:** `reports.md` and `reports.json`.
-   - Load the processed data with `st.cache_data`. Call `run_engine` with `asyncio.run` inside the button handler. The app contains display code only.
+1. **`src/ma_engine/app.py` (Streamlit), started by `make run`.** The screen is specified in Subplan 9. The app contains display code only. Load the processed data with `st.cache_data`. Call `run_engine` with `asyncio.run` from the research action.
 2. **Clear error states:** missing processed data (tell the user to run `make data`), missing API key, MCP server failed to start, a buyer failed, fewer than 10 valid reports.
 3. **`make check`:** runs the Subplan 4 quality metrics on the latest run in `outputs/runs/` and prints a short pass/fail summary.
 4. **End-to-end tests** (`tests/test_end_to_end.py`) with a mocked LLM and the real MCP server and data: a full run produces 10 reports and a trace; missing CSV; missing key; tool failure; one buyer failure with substitution; malformed model output ends as "Not verified". No real API calls in tests.

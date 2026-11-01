@@ -7,37 +7,48 @@
    The run folder is created only after both succeed (the MCP server log waits in a hidden file
    in `config.RUNS_DIR` until then), so a run stopped early leaves no folder.
 3. Research the top `config.REPORT_COUNT` buyers in parallel. A buyer that fails with an error
-   (not a guardrail failure) is replaced by a reserve: one of the same type if losing it breaks
-   the buyer-type rule, otherwise the next one. Ranks are renumbered 1..N afterwards, and the
-   failed buyer's error and partial trace are kept. Errors that would hit every buyer the same
-   way (configuration, authentication, rate limits) stop the run instead.
-4. Committee review: one LLM call over all reports may move each conviction by one step; a
-   decision is applied only if the conviction still passes the guardrails for that buyer.
-   Applying the decisions is a calculation step.
-5. Save `reports.json`, `reports.md`, `ranking.json` and `trace.json` in
+   (not a guardrail failure) stays in its ranked place with status `failed`, `draft` null and
+   `error` set to the message. Nothing is substituted. The partial trace is kept. Errors that
+   would hit every buyer the same way (configuration, authentication, rate limits) stop the run.
+4. Committee review: one LLM call over the reports that have a body may move each conviction by
+   one step; a decision is applied only if the conviction still passes the guardrails for that
+   buyer. Applying the decisions is a calculation step. Failed buyers are left as they are.
+5. Save `reports.json`, `reports.md`, `sources.json`, `ranking.json` and `trace.json` in
    `outputs/runs/<run_id>/`. `trace["events"]` is the activity list.
+   `sources.json` is `guardrails.build_sources`: `{numbers, entries}`.
 
 `progress(event)` receives the event dicts described in `agent.py` (each has `message`, so the
 CLI can print `event["message"]`). Saved runs: `load_run(run_dir)["trace"]["events"]`.
 
 Public functions
 ----------------
-`run_engine(target, use_cache=True, excluded_keys=(), progress=None, request=None) -> dict`
-    `{run_id, run_dir, target: Target, ranking, reports, trace}`.
+`run_engine(target, use_cache=True, excluded_keys=(), progress=None, request=None,
+            research_title=None) -> dict`
+    `{run_id, run_dir, target: Target, ranking, reports, trace, research_title}`.
     `ranking` is the `rank_acquirers` data dict (also written to `ranking.json`).
     `trace["events"]` is the activity list. `trace["totals"]` is `wall_time_s`, `llm_calls`,
     `mcp_tool_calls`, `tokens_in`, `tokens_out`, `cost_usd`, `cache_hits`.
     `request` is the user's sentence, stored on `trace["request"]` and on the first
     `run` event's input. It is None when the caller did not pass one.
+    `research_title` is the cleaned display name from parsing, or None. It is stored
+    once on `reports.json` and is not used for ranking or research. None saves the
+    sector fallback.
 
 `load_run(run_dir) -> dict`
-    Same keys as `run_engine`. `ranking` is None when the folder has no `ranking.json`.
+    Same keys as `run_engine`, plus `sources` (`sources.json`, or None when the file
+    is missing). `ranking` is None when the folder has no `ranking.json`.
     `trace` is `{}` when the folder has no `trace.json`. Reports come from
     `guardrails.load_reports`.
 
-`parse_target(text, use_cache=True, progress=None) -> tuple[Target, list[str]]`
-    One LLM client, then `agent.parse_request`. Returns `(target, defaulted)`. The UI shows
-    that target and then calls `run_engine` itself. Events go to `progress`.
+Report status values: `verified`, `not_verified`, `failed`.
+A failed report has `draft=None` and `error` set. `sources.json` shape is documented
+on `guardrails.build_sources`. Follow-up answers extend that file
+(`guardrails.extend_sources`) and render `[n]` from the same numbers.
+
+`parse_target(text, use_cache=True, progress=None) -> tuple[Target, list[str], str | None]`
+    One LLM client, then `agent.parse_request`. Returns `(target, defaulted, title)`.
+    `title` is the cleaned research name, or None. The UI shows that target and then
+    calls `run_engine` itself. Events go to `progress`.
 
 `run_followup(question, run, use_cache=True, progress=None) -> FollowupResult`
     One LLM client and exactly one MCP session. Appends the answer to `followups.json`
@@ -46,6 +57,8 @@ Public functions
 
 Run headless with `uv run python -m ma_engine.engine` (default target).
 """
+
+from ma_engine import submissions
 
 import asyncio
 import itertools
@@ -62,15 +75,14 @@ import openai
 
 from ma_engine import config, guardrails
 from ma_engine.agent import (Steps, activity_totals, answer_followup, call_llm, close_step,
-                             llm_record, load_prompt, open_step, parse_request, research_buyer,
-                             tool_decision, tool_output_summary)
+                             display_research_title, llm_record, load_prompt, open_step,
+                             parse_request, research_buyer, tool_decision, tool_output_summary)
 from ma_engine.clients.llm_client import scrub_secret
 from ma_engine.clients.llm_client import LLMClient, LLMConfigError
 from ma_engine.clients.mcp_client import MCPClient
-from ma_engine.models import BuyerReport, CommitteeReview, Conviction, FollowupResult, Target
-from ma_engine.ranking import MIN_PER_TYPE
+from ma_engine.models import BuyerReport, CommitteeReview, Conviction, FollowupResult, Statement, Target
 
-# Errors that would hit every buyer the same way: stop the run instead of substituting.
+# Errors that would hit every buyer the same way: stop the run.
 # A rate limit reaching this point has already survived this process's own retries.
 FOLLOWUPS_FILE = "followups.json"
 FATAL_ERRORS = (LLMConfigError, openai.AuthenticationError, openai.PermissionDeniedError,
@@ -131,62 +143,44 @@ async def _rank(mcp, target: Target, excluded_keys, steps: Steps, progress) -> d
     return result
 
 
-def pick_reserve(failed: dict, top: list, reserves: list) -> tuple[dict | None, bool]:
-    """Remove and return the reserve to research instead of `failed`, with whether the type rule
-    chose it. A reserve of the same type is preferred when losing `failed` leaves fewer than
-    MIN_PER_TYPE of its type among the other buyers in `top`."""
-    if not reserves:
-        return None, False
-    kind = failed["acquirer_type"]
-    left = sum(e is not None and e is not failed and e["acquirer_type"] == kind for e in top)
-    same_type = next((r for r in reserves if r["acquirer_type"] == kind), None)
-    by_type = left < MIN_PER_TYPE and same_type is not None
-    pick = same_type if by_type else reserves[0]
-    reserves.remove(pick)
-    return {**pick, "selection_note": f"Replaced {failed['display_name']} after an error"}, by_type
+def failed_report(entry: dict, error: str) -> BuyerReport:
+    """A ranked buyer whose research raised. No draft, status `failed`, error kept."""
+    return BuyerReport(
+        acquirer_key=entry["acquirer_key"], display_name=entry["display_name"],
+        acquirer_type=entry["acquirer_type"], rank=entry["rank"], score_rank=entry["score_rank"],
+        score=entry["score"]["display"], selection_note=entry.get("selection_note"),
+        starting_level=entry["starting_conviction"]["level"], draft=None, status="failed",
+        issues=[error], error=error)
 
 
 async def _research_all(shortlist, target_block, llm, mcp, use_cache, notify, steps) -> tuple:
-    """Reports for the top buyers, replacing any buyer whose research raises a per-buyer error."""
+    """Reports for the top buyers. A per-buyer error stays in that rank as status `failed`."""
     semaphore = asyncio.Semaphore(config.MAX_PARALLEL_BUYERS)
     top = list(shortlist[:config.REPORT_COUNT])
-    reserves = list(shortlist[config.REPORT_COUNT:])
-    errors, substitutions = [], []
+    errors = []
 
-    async def slot(index):
-        while True:
-            entry = top[index]
-            try:
-                async with semaphore:
-                    return entry, await research_buyer(entry, target_block, llm, mcp, use_cache,
-                                                       notify, steps)
-            except FATAL_ERRORS:
-                raise
-            except Exception as exc:
-                message = scrub_secret(f"{type(exc).__name__}: {exc}")
-                errors.append({"acquirer_key": entry["acquirer_key"], "error": message,
-                               "partial_trace": getattr(exc, "trace", None)})
-                replacement, by_type = pick_reserve(entry, top, reserves)
-                top[index] = replacement
-                if replacement is None:
-                    _emit_buyer_failed(steps, notify, entry, message)
-                    return entry, None
-                substitutions.append({"failed": entry["acquirer_key"],
-                                      "failed_name": entry["display_name"],
-                                      "replacement": replacement["acquirer_key"],
-                                      "replacement_name": replacement["display_name"],
-                                      "replacement_shortlist_rank": replacement["rank"],
-                                      "same_type_rule": by_type, "error": message})
-                _emit_substitution(steps, notify, substitutions[-1])
+    async def slot(entry):
+        try:
+            async with semaphore:
+                return entry, await research_buyer(entry, target_block, llm, mcp, use_cache,
+                                                   notify, steps)
+        except FATAL_ERRORS:
+            raise
+        except Exception as exc:
+            message = scrub_secret(f"{type(exc).__name__}: {exc}")
+            errors.append({"acquirer_key": entry["acquirer_key"], "error": message,
+                           "partial_trace": getattr(exc, "trace", None)})
+            _emit_buyer_failed(steps, notify, entry, message)
+            return entry, None
 
-    tasks = [asyncio.ensure_future(slot(i)) for i in range(len(top))]
+    tasks = [asyncio.ensure_future(slot(entry)) for entry in top]
     try:
         outcomes = await asyncio.gather(*tasks)
     except BaseException:
         for task in tasks:
             task.cancel()
         raise
-    return [o for o in outcomes if o[1] is not None], errors, substitutions
+    return list(outcomes), errors
 
 
 # ---------- committee review ----------
@@ -275,25 +269,13 @@ async def _committee(reports, entries, evidence, ranking_data, llm, use_cache, s
 
 # ---------- progress events ----------
 
-def _emit_substitution(steps: Steps, progress, sub: dict) -> None:
-    message = f"Substituting {sub['replacement_name']} for {sub['failed_name']}"
-    opened = open_step(steps, progress, category="app", name="substitution", message=message,
-                       acquirer_key=sub["replacement"],
-                       input={"failed": sub["failed"], "replacement": sub["replacement"],
-                              "same_type_rule": sub["same_type_rule"], "error": sub["error"]})
-    close_step(progress, opened, status="completed", message=message, duration_ms=0,
-               decision=message, output={"failed_name": sub["failed_name"],
-                                         "replacement_name": sub["replacement_name"],
-                                         "same_type_rule": sub["same_type_rule"]})
-
-
 def _emit_buyer_failed(steps: Steps, progress, entry: dict, error: str) -> None:
-    """A buyer errored and no reserve was left to take the slot."""
+    """One buyer's research raised. The buyer stays in rank with status failed."""
     message = f"{entry['display_name']}: failed ({error})"
     opened = open_step(steps, progress, category="app", name="buyer_failed", message=message,
                        acquirer_key=entry["acquirer_key"], input={"error": error})
     close_step(progress, opened, status="failed", message=message, duration_ms=0, error=error,
-               decision=f"{entry['display_name']} failed and no reserve was left")
+               decision=f"{entry['display_name']} failed and stays in rank {entry['rank']}")
 
 
 def _emit_ranking(steps: Steps, progress, ranking: dict) -> None:
@@ -320,13 +302,35 @@ def _write_json(path, data) -> None:
                     encoding="utf-8")
 
 
+def complete_ranking_sources(sources, ranking, reports):
+    """Append sources for visible ranking counts even when no LLM report was written."""
+    keys = {report.acquirer_key for report in reports}
+    ids = [value["stat_id"] for entry in (ranking or {}).get("buyers", [])
+           if entry["acquirer_key"] in keys
+           for field in ("relevant_closed_count", "direct_closed_count", "near_size_closed_count")
+           if isinstance(value := entry.get(field), dict) and value.get("stat_id")]
+    return guardrails.extend_sources(sources or {"numbers": {}, "entries": []},
+        [Statement(text="", kind="fact", source_ids=ids)], ranking)
+
+
 def save_run(run_dir, run_id: str, target: Target, reports: list[BuyerReport], trace: dict,
-             ranking: dict) -> None:
-    _write_json(run_dir / "reports.json", {"run_id": run_id, "target": target.model_dump(),
-                                           "reports": [r.model_dump() for r in reports]})
-    (run_dir / "reports.md").write_text(guardrails.render_run_markdown(reports), encoding="utf-8")
+             ranking: dict, research_title: str | None = None) -> dict:
+    """Write the run files. Returns the sources dict that was saved.
+
+    `research_title` is display text. A missing or unusable value is stored as the
+    sector fallback. It is not written inside `target`.
+    """
+    sources = complete_ranking_sources(guardrails.build_sources(reports, ranking), ranking, reports)
+    title = display_research_title(research_title, target.sector)
+    _write_json(run_dir / "reports.json", {
+        "run_id": run_id, "target": target.model_dump(), "research_title": title,
+        "reports": [r.model_dump() for r in reports]})
+    (run_dir / "reports.md").write_text(
+        guardrails.render_narrative(reports, target, ranking, sources), encoding="utf-8")
+    _write_json(run_dir / "sources.json", sources)
     _write_json(run_dir / "ranking.json", ranking)
     _write_json(run_dir / "trace.json", trace)
+    return sources
 
 
 def _read_json(path: Path):
@@ -338,19 +342,28 @@ def load_run(run_dir) -> dict:
     folders saved without ranking.json or trace.json."""
     run_dir = Path(run_dir)
     saved, reports = guardrails.load_reports(run_dir)
-    return {"run_id": saved["run_id"], "run_dir": str(run_dir),
-            "target": Target.model_validate(saved["target"]),
-            "ranking": _read_json(run_dir / "ranking.json"), "reports": reports,
+    target = Target.model_validate(saved["target"])
+    ranking = _read_json(run_dir / "ranking.json")
+    original_sources = _read_json(run_dir / "sources.json")
+    sources = complete_ranking_sources(original_sources, ranking, reports)
+    if ranking and sources != original_sources:
+        _write_json(run_dir / "sources.json", sources)
+    return {"run_id": saved["run_id"], "run_dir": str(run_dir), "target": target,
+            "research_title": display_research_title(saved.get("research_title"), target.sector),
+            "ranking": ranking, "reports": reports,
+            "sources": sources,
             "trace": _read_json(run_dir / "trace.json") or {}}
 
 
 # ---------- pipeline ----------
 
 async def run_engine(target: Target | dict, use_cache: bool = True, excluded_keys=(),
-                     progress=None, request: str | None = None) -> dict:
+                     progress=None, request: str | None = None,
+                     research_title: str | None = None) -> dict:
     """Rank, research, review and save one run. `progress(event)` receives live event dicts.
 
     `request` is the user's sentence, stored for the screen. It is not interpreted.
+    `research_title` is stored once with the run. It is not sent to ranking or the model.
     """
     started = time.perf_counter()
     target = target if isinstance(target, Target) else Target.model_validate(target)
@@ -392,27 +405,42 @@ async def run_engine(target: Target | dict, use_cache: bool = True, excluded_key
             shortlist = ranking["buyers"]
             _emit_ranking(steps, notify, ranking)
             await llm.supported_parameters()
+            if hasattr(llm, "validate_research_model"):
+                await llm.validate_research_model()
             run_id, run_dir = _new_run_dir()
             trace["run_id"] = run_id
             log.rename(run_dir / "mcp_server.log")
 
             research_started = time.perf_counter()
-            outcomes, errors, substitutions = await _research_all(
+            outcomes, errors = await _research_all(
                 shortlist, ranking["target"], llm, mcp, use_cache, notify, steps)
             trace["research_ms"] = _ms(research_started)
-            outcomes.sort(key=lambda o: o[0]["rank"])
-            entries = {e["acquirer_key"]: e for e, _ in outcomes}
-            reports = [result[0].model_copy(update={"rank": rank})
-                       for rank, (_, result) in enumerate(outcomes, 1)]
-            evidence = {e["acquirer_key"]: guardrails.build_evidence(e, result[1])
-                        for e, result in outcomes}
+            outcomes.sort(key=lambda pair: pair[0]["rank"])
+            error_by_key = {item["acquirer_key"]: item for item in errors}
+            reports, evidence, buyer_traces, entries = [], {}, [], {}
+            for entry, result in outcomes:
+                entries[entry["acquirer_key"]] = entry
+                if result is None:
+                    err = error_by_key[entry["acquirer_key"]]
+                    reports.append(failed_report(entry, err["error"]))
+                    buyer_traces.append(err.get("partial_trace") or {
+                        "acquirer_key": entry["acquirer_key"],
+                        "display_name": entry["display_name"],
+                        "final_status": "failed", "error": err["error"]})
+                else:
+                    reports.append(result[0])
+                    evidence[entry["acquirer_key"]] = guardrails.build_evidence(entry, result[1])
+                    buyer_traces.append(result[2])
 
             committee = {"skipped": "no reports"}
-            if reports:
+            written = [report for report in reports if report.draft is not None]
+            if written:
                 committee_started = time.perf_counter()
-                reports, committee = await _committee(reports, entries, evidence, ranking, llm,
+                written, committee = await _committee(written, entries, evidence, ranking, llm,
                                                       use_cache, steps, notify)
                 committee["duration_ms"] = _ms(committee_started)
+                by_key = {report.acquirer_key: report for report in written}
+                reports = [by_key.get(report.acquirer_key, report) for report in reports]
     finally:
         log.unlink(missing_ok=True)
 
@@ -426,31 +454,34 @@ async def run_engine(target: Target | dict, use_cache: bool = True, excluded_key
                     "promoted_keys": ranking["promoted_keys"],
                     "displaced_keys": ranking["displaced_keys"],
                     "reserve_added_keys": ranking["reserve_added_keys"]},
-        "errors": errors, "substitutions": substitutions, "committee": committee,
-        "buyers": [result[2] for _, result in outcomes],
-        "quality": guardrails.quality_metrics(reports),
+        "errors": errors, "substitutions": [], "committee": committee,
+        "buyers": buyer_traces,
+        "quality": guardrails.quality_metrics(reports, ranking),
     })
     opened = open_step(steps, notify, category="app", name="save", message="Saving the run",
                        input={"run_id": run_id})
     save_started = time.perf_counter()
-    save_run(run_dir, run_id, target, reports, trace, ranking)
+    save_run(run_dir, run_id, target, reports, trace, ranking, research_title)
     saved = f"Saved run to {run_dir}"
     close_step(notify, opened, status="completed", message=saved, duration_ms=_ms(save_started),
                decision=f"Saved reports, ranking and trace to {run_dir}",
                output={"run_id": run_id, "run_dir": str(run_dir),
-                       "files": ["reports.json", "reports.md", "ranking.json", "trace.json"]})
+                       "files": ["reports.json", "reports.md", "sources.json",
+                                 "ranking.json", "trace.json"]})
     trace["wall_time_s"] = round(time.perf_counter() - started, 2)
     trace["totals"] = activity_totals(recorded, llm.totals, trace["wall_time_s"])
     _write_json(run_dir / "trace.json", trace)
     return {"run_id": run_id, "run_dir": str(run_dir), "target": target, "ranking": ranking,
-            "reports": reports, "trace": trace}
+            "reports": reports, "trace": trace,
+            "research_title": display_research_title(research_title, target.sector)}
 
 
 async def parse_target(text: str, use_cache: bool = True,
-                       progress=None) -> tuple[Target, list[str]]:
-    """One LLM client around `agent.parse_request`. Returns `(target, defaulted)`.
+                       progress=None) -> tuple[Target, list[str], str | None]:
+    """One LLM client around `agent.parse_request`. Returns `(target, defaulted, title)`.
 
-    Events go to `progress`. Show the target, then call `run_engine` when the user confirms.
+    `title` is cleaned display text, or None. Events go to `progress`. Show the target,
+    then call `run_engine` when the user confirms.
     """
     return await parse_request(text, LLMClient(), use_cache=use_cache, progress=progress)
 
@@ -473,15 +504,36 @@ async def run_followup(question: str, run: dict, use_cache: bool = True,
     run_dir = run.get("run_dir")
     if not run_dir:
         raise ValueError("This run has no folder (run_dir), so the follow-up cannot be saved.")
+    submission = submissions.begin(question, run.get("run_id") or Path(run_dir).name)
+    try:
+        result = await _run_followup_saved(question, run, use_cache, progress)
+    except BaseException:
+        submissions.finish(submission, "interrupted")
+        raise
+    submissions.finish(submission, "completed")
+    return result
+
+
+async def _run_followup_saved(question, run, use_cache, progress):
+    run_dir = run["run_dir"]
     llm = LLMClient()
     log = _pending_log()
     mcp = MCPClient(log_file=log)
     try:
         async with mcp:
-            result = await answer_followup(question, run, llm, mcp, use_cache, progress)
+            context_run = {**run, "followups": _read_json(Path(run_dir) / "followups.json") or []}
+            result = await answer_followup(question, context_run, llm, mcp, use_cache, progress)
     finally:
         log.unlink(missing_ok=True)
-    _append_followup(Path(run_dir), result)
+    folder = Path(run_dir)
+    sources = guardrails.extend_sources(
+        _read_json(folder / "sources.json") or {"numbers": {}, "entries": []},
+        result.statements, run.get("ranking"))
+    _write_json(folder / "sources.json", sources)
+    result = result.model_copy(update={
+        "markdown": guardrails.render_answer(result.statements, result.status, result.issues,
+                                             sources["numbers"])})
+    _append_followup(folder, result)
     return result
 
 
@@ -489,17 +541,19 @@ def print_summary(run: dict) -> None:
     trace, reports = run["trace"], run["reports"]
     totals = trace["llm_totals"]
     verified = sum(r.status == "verified" for r in reports)
-    mix = Counter(r.draft.conviction.level for r in reports)
+    mix = Counter(r.draft.conviction.level for r in reports if r.draft is not None)
     print(f"\nRun {run['run_id']} with {trace['model']}")
     print(f"Wall time: {trace['wall_time_s']} s (ranking {trace['ranking_ms']} ms, research "
           f"{trace['research_ms']} ms)")
     print(f"LLM calls: {totals['calls']} ({totals['cache_hits']} from cache); tokens in "
           f"{totals['prompt_tokens']}, out {totals['completion_tokens']}; cost "
           f"${totals['cost_usd']:.4f}")
-    print(f"Reports: {len(reports)}, verified {verified}; conviction "
+    failed = [report.display_name for report in reports if report.status == "failed"]
+    print(f"Reports: {verified + sum(r.status == 'not_verified' for r in reports)} written, "
+          f"verified {verified}, failed {len(failed)}; conviction "
           + ", ".join(f"{level} {mix.get(level, 0)}" for level in ("High", "Medium", "Low")))
-    if trace["substitutions"]:
-        print(f"Substitutions: {trace['substitutions']}")
+    if failed:
+        print(f"Failed: {', '.join(failed)}")
     print(f"Run folder: {run['run_dir']}")
 
 

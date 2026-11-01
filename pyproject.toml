@@ -10,6 +10,7 @@ dependencies = [
     "fastmcp",
     "openai",
     "streamlit",
+    "watchdog>=6.0.0",
 ]
 
 [dependency-groups]

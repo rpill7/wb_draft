@@ -181,3 +181,12 @@ async def test_fastmcp_in_memory_client():
                                         raise_on_error=False)
         assert failed.is_error
         assert "Unknown sector 'Hospitals'" in failed.content[0].text
+
+
+def test_search_distinguishes_complete_from_truncated_results():
+    complete = tools.search_deals(sectors=[HCS], size_band=MID, outcomes=["Closed"], limit=25)["data"]
+    assert complete["returned"] == complete["total_matches"] == 10
+    assert complete["truncated"] is False
+    limited = tools.search_deals(sectors=[HCS], size_band=MID, outcomes=["Closed"], limit=2)["data"]
+    assert limited["returned"] == 2 and limited["total_matches"] == 10
+    assert limited["truncated"] is True

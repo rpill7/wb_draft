@@ -828,3 +828,325 @@ Follow-up after a browser check:
 Open:
 - No live-model click-through of this screen yet, so token and cost on a real provider are still unmeasured.
 - `README.md` and `docs/architecture.md` still describe the old form. This task left them unchanged.
+
+## Subplan 9 — Backend
+
+Backend only (Part 1, steps 1a–1g). The chat screen was not rebuilt. `app.py` got three small guards so a buyer with no report body does not crash the current page. README and `docs/` were not edited. The Streamlit process on port 8501 was left running.
+
+Files changed:
+- `src/ma_engine/clients/data_client.py` — statistic ids and `stat_record` / `key_metrics` / `note_ranking`
+- `src/ma_engine/mcp_server/tools.py` — `stat_id` on profile, sector, and comps fields
+- `src/ma_engine/ranking.py` — `ST-RANK-` ids on signals and the three count fields
+- `src/ma_engine/models.py` — `ReportDraft.summary`; report status `failed`; `error`; `draft` may be null
+- `src/ma_engine/guardrails.py` — statistic checks, percentile labels, target numbers in unknowns, `sources.json`, narrative `reports.md`
+- `src/ma_engine/clients/llm_client.py` — caller chooses `max_tokens`; records `finish_reason` and a cut-off flag
+- `src/ma_engine/agent.py` — token caps, cut-off repair, research stages
+- `src/ma_engine/engine.py` — no silent replacement; writes `sources.json`; follow-ups extend it
+- `src/ma_engine/prompts/research_writer.md`, `repair.md`, `followup.md`
+- `src/ma_engine/app.py` — null-draft guards only
+- `tests/test_narrative.py` (new) plus updates in the existing tests
+
+### Public contract for the UI
+
+`get_client().stat_record(stat_id) -> dict | None`
+
+`{stat_id, calculation, filters, n, value, display, source_ids}`
+
+Ids are stable:
+- `ST-COMPS-<sector>-<scope>-<band>-<metric>-<stat>` for example `ST-COMPS-healthcare-services-sector_only-100-400-ev_ebitda-median`
+- `ST-SECTOR-<sector>-<field>`
+- `ST-PROFILE-<buyer>-<field>` (underscores in the field become hyphens)
+- `ST-RANK-<buyer>-<signal>` for example `ST-RANK-blackstone-size_fit`
+
+`ST-RANK-` records depend on the target. `note_ranking(ranking_data)` loads them from `ranking.json`. `quality_metrics(reports, ranking)` and `python -m ma_engine.guardrails` do that load, so those ids are valid citations.
+
+`get_client().key_metrics(acquirer_key)` is the closed-deal card, in this order, each a full record. The same list is on `get_acquirer_profile` as `data["key_metrics"]`:
+
+1. closed count
+2. median, smallest, and largest closed deal size
+3. median EV/EBITDA and median EV/Revenue on closed deals
+4. private-target count
+5. median bidders and median days to close
+
+`guardrails.build_sources(reports, ranking=None)` returns:
+
+```text
+{"numbers": {"MA-2021-0195": 1, "ST-COMPS-...": 2},
+ "entries": [{"number": 1, "id": "MA-2021-0195", "kind": "deal",
+              "record": {<full processed CSV row>}},
+             {"number": 2, "id": "ST-...", "kind": "statistic",
+              "record": {stat_id, calculation, filters, n, value, display, source_ids}}]}
+```
+
+Numbers follow first appearance: summaries in rank order, then each report's sections (overview, fit, precedents, valuation, risks, conviction). An id with no record gets no number.
+
+`guardrails.extend_sources(sources, statements, ranking=None)` is what a follow-up uses. Numbers already assigned stay. New ids are appended after the highest number. A follow-up does not start again at 1.
+
+`engine.load_run(run_dir)` adds `sources` (the `sources.json` object, or None). `engine.run_followup` extends that file and renders the answer with `[n]`.
+
+`ReportDraft.summary` is one `Statement`, checked like the others. Sections stay lists of statements. `reports.md` joins them into paragraphs.
+
+`BuyerReport.status` is `verified`, `not_verified`, or `failed`. A failed buyer keeps its rank. `draft` is null, `error` is the message, and `issues` is `[error]`. There is no replacement buyer. `trace["substitutions"]` is always `[]`. `trace["errors"]` still holds the partial trace. `quality_metrics` `report_count` counts reports that have a body. `failed` lists the buyers with status `failed`.
+
+`agent.RESEARCH_STAGES` groups events for the progress card. Match `(category, name)`:
+
+| Stage id | Label | Events |
+|---|---|---|
+| `identify` | Identify relevant sectors and buyers | `calculation`/`ranking`, `mcp_tool`/`rank_acquirers` |
+| `investigate` | Investigate buyer transaction histories | `mcp_tool` / `get_acquirer_profile`, `get_acquirer_deals`, `search_deals`, `get_sector_overview`, `get_dataset_overview` |
+| `comps` | Calculate valuation comparisons | `mcp_tool` / `get_valuation_comps` |
+| `reports` | Generate and validate 10 reports | `llm`/`write`, `llm`/`repair`, `validation`/`check` |
+
+Research rounds use 1,000 output tokens and should reply `DONE`. Write and repair use 8,000. A cut-off (`finish_reason` `length`, or JSON that stops early) is repaired once with `Your output was cut off; write shorter statements`. Visible model text in the trace is still cut at 300 characters.
+
+### Decisions
+
+- A buyer whose research raises stays in its ranked place with status `failed`. Reserves are not swapped in. This replaces the substitution rule from Subplan 7.
+- A money, multiple, or percent that equals a statistic display must cite that `ST-` id. A figure that equals a cited deal's own field does not. Citing a ranking signal also covers the numbers in its explanation, and a cited statistic's `n` may be quoted as that integer.
+- `p25`, `p50`, `p75`, `p90`, `25th percentile`, and the words `median` and `interquartile` are not numbers. An `unknown` may quote figures from the target block, such as `$200.0M`.
+- `reports.md` is the narrative document (executive summary, shortlist, six sections as paragraphs with `[n]`, verification, Sources appendix). It is built only from the checked statements.
+
+Commands and real output:
+- `uv run pytest -q` → `207 passed in 43.92s`.
+
+Real runs, default target, model `anthropic/claude-haiku-5.5`. Two runs, then no more.
+
+First run `outputs/runs/20261031-222316`, before ranking-explanation numbers were accepted as part of the cited signal:
+- Wall time 54.37 s. Cost $0.1317. Tokens 869,190 in / 89,522 out. LLM calls 42.
+- Verified 4, not verified 6, failed 0.
+
+That run's common miss was a ranking sentence such as "within 2x" or "14 of 14" rejected after the writer had cited the `ST-RANK-` id. The checker only trusted the score display, not the explanation. The fix treats the explanation and the statistic's `n` as part of the cited statistic. Tests use the real `p25`/`p75` sentence and the real unknown that quotes `$200.0M`.
+
+Second run `outputs/runs/20261031-222706` (the measurement):
+- Wall time 50.28 s (under the 60 s target). Ranking 269 ms. Research 41.4 s.
+- Cost $0.1433. Tokens 992,332 in / 88,108 out. LLM calls 43. Cache hits 0.
+- Verified 6, not verified 3, failed 1. No buyer was replaced.
+- `sources.json`: 201 entries (156 statistics, 45 deals).
+- `uv run python -m ma_engine.guardrails` on that folder:
+
+```text
+Run 20261031-222706: 9 reports
+Failed buyers: 1 ['gtcr']
+Invalid citations: 0
+Reports not verified: 3 ['new mountain capital', 'bain capital', 'francisco partners']
+Fact statements with citations: 165 of 165 (100.0%)
+Conviction mix: High 3, Medium 3, Low 3
+Buyer-type mix: Financial Sponsor 7, Strategic 3
+Max strategic-fit similarity: 0.38 (threshold 0.5); pairs above: none
+Result: FAIL (9 of 10 reports; 1 failed; 3 report(s) not verified)
+```
+
+Remaining issues in that run are the model breaking rules that stayed in force, not the old false positives:
+- GTCR failed: the repair returned 5 risk flags; the format allows 4. The buyer stayed at rank 7 with status `failed` and the error on the report.
+- New Mountain Capital: a Withdrawn deal id written in the text, and the word "closed" on that deal; one count (`14`) not tied to a cited statistic.
+- Bain Capital: "Acquisition of" on a Pending deal.
+- Francisco Partners: "completed" on a Rumored deal; an unknown that quotes `2024`, which is not a target figure.
+
+Open:
+- The screen that renders the narrative, the `[n]` links, the Key metrics card, and the four progress stages is not built. It should read `load_run`, `sources`, `key_metrics`, and `RESEARCH_STAGES`, and it should not call the engine when the user switches buyers.
+- `README.md` and `docs/` still describe the older report.
+- The saved `trace["quality"]` in `20261031-222706` was written before `make check` learned to load `ranking.json`, so that file still lists `ST-RANK-` ids as invalid. `python -m ma_engine.guardrails` on the same folder reports 0 invalid citations. That command is the one to trust.
+
+## Subplan 9 — UI
+
+The chat screen was rebuilt around the owner's layout. The product name on the page is "M&A Acquirer Research Assistant". No firm name. Numbers and sentences on the page come from the loaded run. The placeholder text in the mock-up was not copied.
+
+Files changed:
+- `src/ma_engine/app.py` — three-part screen: navy sidebar, middle column (request, short answer, progress, top 10, follow-up), right panel (five tabs and Export Report)
+- `src/ma_engine/ui_report.py` — new. Turns a saved run into the report HTML, source cards, key-metrics card, and the four progress stages
+- `.streamlit/config.toml` — light main theme and a `[theme.sidebar]` navy section (Streamlit 1.66)
+- `tests/test_app.py` — the new views, citation anchors, a failed buyer left in place, and a switch that must not call the engine
+
+### Decisions
+
+- The Report tab opens on all 10 buyers (summary, shortlist, jump buttons, six sections each, Sources, Diagnostics). A Top 10 row or a jump button opens that one buyer. Previous and Next only change session state.
+- `[n]` is an in-page link (`href="#src-n"`) drawn with `st.markdown(unsafe_allow_html=True)`. A full reload does not happen. In that HTML, `$` is written as `&#36;` so Streamlit does not draw math and the page does not show a backslash. Ordinary markdown still goes through `ui_trace.as_markdown`.
+- Key metrics are `get_client().key_metrics` display strings, each next to its `stat_id`. A `[n]` is added only when that id already has a number in the run's sources.
+- A deal card prints the stored CSV fields. Money and multiples use the same `fmt_money` / `fmt_multiple` strings the tools already use. No new statistic is computed.
+- A stage's time is the clock span of the events `RESEARCH_STAGES` lists for it (first start to last finish), so parallel buyers are not added together. If an event has no timestamp, the recorded durations are added instead.
+- A failed buyer stays at its rank. The page shows one short warning. The error text is only inside Diagnostics.
+- `run_engine` does not put `sources` on the dict it returns. The screen reads `sources.json` when it opens the run, and again after a follow-up.
+
+Commands and real output:
+- `uv run pytest -q` → `209 passed in 44.17s`.
+
+Checked in the browser on the saved run `outputs/runs/20261031-222706` (no new model run). The app was restarted with `make run` and left running at http://localhost:8501.
+
+- All-buyers report: executive summary, conviction mix (High 3, Medium 3, Low 3), 6 verified, 3 not verified, 1 failed, prose with blue `[n]` links. Sidebar shows Healthcare Services, size $200.0M, margin Strong, 10 buyers.
+- Clicking `[1]` changed the address to `#src-1` and landed on the source card for `ST-RANK-blackstone-score` (calculation, filters, n, value 0.66). Deal cards in the same list show values such as `$341.7M`.
+- Single-buyer view for the first buyer: back link, High pill separate from a Verified pill, score 0.66 (rank 1), section tabs, prose, and the Key metrics card (for example median closed deal size `$341.8M` with its stat id).
+- Agent Activity for that buyer shows the stored totals (50.28 s, 43 LLM calls, 34 tool calls) and the real steps.
+- Screenshots: `/tmp/all-buyers-top.png`, `/tmp/citation-source.png`, `/tmp/single-buyer.png`, `/tmp/agent-activity.png`.
+
+Open:
+- `README.md` and `docs/` still describe the older report.
+- The saved `trace["quality"]` in `20261031-222706` is still the stale file from before `make check` loaded `ranking.json`. Trust `python -m ma_engine.guardrails` on that folder.
+- At a window about 1180 pixels wide, the last tab (Agent Activity) and section tabs 5 and 6 sit past a small scroll arrow. They are on the page.
+- Research rounds are not one of the four `RESEARCH_STAGES` groups, so their time is only in the stored wall time (50.28 s). On this run the stage lines are 268 ms, 2.6 s, 4.1 s and 39.1 s.
+- A statistic with no sample size shows `n` as a dash. The blended score is one of those.
+
+## UI redesign — progress, edit target, layout, report panel, citations, writing prompt — 2026-11-01
+
+Owner requests after Subplan 9: progress placement and two-level progress, an Edit target control, then Prompts 1–5 (layout, report panel, citations, report writing, sidebar reflow). No change to ranking, tools, the MCP server or the guardrail checks.
+
+Files changed:
+- `src/ma_engine/app.py` — live `st.status` with four stages and a one-line note; completion line ("Research complete · 46.71s · 10 buyers identified · 10 reports generated", plus "· k not verified" / "· k failed"); "View technical activity" grouped by run and buyer; Edit target form (Save shows "Run research with updated target", Cancel changes nothing); compact sidebar (New Research, Recent research, All research, About); chat column centred at a reading width with its own scroll area and the chat box under it; buyer cards; report panel with one tab row; Diagnostics per buyer. Removed: forced sidebar width, run card, Saved Reports page, citation chips, citation table, Sources list, source-view box, section sub-tabs.
+- `src/ma_engine/ui_report.py` — `[n]` is now a `<details>` source card (deal fields; or statistic calculation, value, filters, `n`, the transactions used with "Show all", stat id under Technical details); continuous six-section report document; metric strip (relevant closed deals, closed deals in the target sector, within 2x of the target's size, median closed deal size, median EV/EBITDA).
+- `src/ma_engine/agent.py` — `report_summaries` handles a failed report (follow-up crash fix); each research stage has a note; `buyer_failed` marks the reports stage failed.
+- `src/ma_engine/ui_trace.py` — `step_detail_md`, `activity_groups`, `activity_md`.
+- `src/ma_engine/prompts/research_writer.md` — new "How it reads" section: conclusion first, one paragraph per section, no repeated figures, audible interpretation/unknown wording, history not intent, buyer-specific risks, the exact title "Deals that did not close" with outcome-only wording.
+- `tests/test_app.py`, `tests/test_activity.py`, `tests/test_narrative.py` — updated for the above.
+- `README.md`, `docs/architecture.md` — screen description.
+
+Root cause of the sidebar reflow bug: `PAGE_CSS` forced `[data-testid="stSidebar"] { width: 252px !important; min-width: 252px !important }`. Streamlit 1.66 animates and resizes the sidebar itself (it has a drag handle), so the forced width kept the space after collapse. The chat was also centred with fixed spacer columns. Fix: delete the forced width; centre a keyed chat container with `max-width` and `margin: 0 auto`. Fixed heights on `st.container` keys need `flex: none`, because Streamlit gives every block `flex: 1 1 0%`, which overrides `height`.
+
+Decisions:
+- Citations open in place with HTML only (no rerun, the report does not move). `name="cite"` keeps one open at a time. The card is `position: fixed` at the bottom right. Inside paragraphs the HTML uses `<div class="para">`, because a `<details>` inside `<p>` ends the paragraph. Chrome's `::details-content` is set to inline so `[1][2][3]` stay on one line, and a closed card is hidden with `display: none`.
+- A metric figure that the report did not cite shows a small ⓘ source card built from the ranking entry or the buyer profile record. It is not given a number.
+- Interpretation is shown with a dotted underline and a hover label instead of the word "Interpretation:"; unknowns start "Not in the dataset:". `reports.md` keeps the written labels.
+- The statistic's transaction list comes from `get_client().deal_record(id)` for ids not in the run registry. Ranking figures are read from the run's own `ranking.json`, never from the shared client, which may hold another run's ranking.
+
+Commands and real output:
+- `uv run pytest -q` → `212 passed in 47.93s`.
+- Layout measured in the browser (saved run `20261031-235342`), sidebar open/collapsed × panel open/closed, at 1280, 1440 and 1600 px, and while resizing 1600→1360→1280 with the panel open: horizontal overflow 0 and vertical page overflow 0 in every state; the chat box spans exactly the chat column (for example 1440 collapsed, panel closed: chat 304–1136, centre 720; 1280 sidebar open, panel open: chat 276–696, panel 728–1256).
+- Buyers 1–4 in the panel: six headings each (Acquirer Overview, Strategic Fit Thesis, Precedent Activity, Valuation Context, Risk Flags, Conviction), 37–49 clickable citations each, 0 unregistered ids, five metric cells, Diagnostics present; New Mountain Capital shows Not verified and "3 checks did not pass — see Diagnostics." The selected tab (Valuation & Risk) stayed selected when switching buyers.
+- Citations checked: a transaction (`[3]`, MA-2021-0407: target, buyer, sector, $341.7M, 2021 Q2, Closed, 10.0x, 1.5x, id), a statistic (`[56]`, median EV/EBITDA 17.2x, n = 22, 22 transactions, Show all), a ranking score (`[1]`, 0.66, n —, pointer to Score Breakdown). Opening a second `[n]` closed the first; chat scroll moved 0 px.
+- Writing prompt, real model runs on the default target (tool results cached, write calls new):
+  - Before (old prompt) `20261031-235342`: 8 verified, 2 not verified.
+  - Draft 1 `20261101-002715`: 4 verified, 6 not verified (11 completion-word issues: titles such as "Non-closed deals").
+  - Draft 2 `20261101-002902`: 5 verified, 5 not verified (10 completion-word issues).
+  - Final `20261101-003055`: 10 verified, 0 not verified, $0.116915, 46.71 s.
+  - Citation coverage (fact and interpretation statements with at least one id) is 100% for every buyer before and after. Blackstone: 22→19 statements, 441→431 words, 32→27 unique ids, 2→4 interpretations. The old Blackstone precedent paragraph wrote transaction ids inside the text; the new one names the deals.
+
+Open:
+- One run per prompt version. Model output varies between runs, so 10/10 is one sample, not a rate.
+- New Blackstone conviction says "the strongest fit in the list": a comparison the checker does not test.
+- `direct_closed_count`'s registry record lists the relevant closed deals (7) as its transactions while n is 2; that is how `note_ranking` stores it.
+- Filters show the acquirer key in lower case ("Buyer: blackstone").
+- The Streamlit screenshot tool sometimes captures a stale frame or a collapsed sidebar; layout figures above come from DOM measurements.
+
+## UI — shortlist cards, chat sizing, one Agent activity row per response — 2026-11-01
+
+Owner requests: (1) replace the cramped top-10 table with compact cards and let the chat use the space; (2) give each research answer and each follow-up one "Agent activity" section, reusing the recorded trace. No change to the backend, ranking, FastMCP tools, prompts, report generation, validation or citations.
+
+Causes found in the edited version:
+- Shortlist: the five fixed-ratio columns were too narrow beside the panel ("Ra/nk", "Financial/Sponsor" spilling into the next row, "New Mountain C…", the Not verified pill past the table edge). The owner's screenshot of overflowing two-column cards came from an earlier card version no longer in the tree; it was not traced in this code.
+- Chat: a 52rem cap; a fixed `calc(100dvh - 9.75rem)` that assumed the chat box height; viewport-width rules; and `chat-beside { display: none }` under 640px, which hid the only chat box when the panel was open.
+- Activity: research drew a live status plus a separate "View activity" log (Markdown dump, 420px scroller) that did not collapse with it; the finished view repeated the log in per-buyer tabs; follow-ups drew a live status and then a second "Follow-up activity" expander. `_show_output` scrubbed the text but rendered the unscrubbed object for small outputs. Updating `st.status` on every event collapsed it (or, with `expanded=True`, forced it open), and `with status:` marks a status complete when the block ends.
+
+Files changed:
+- `src/ma_engine/app.py` — shortlist: one `st.button` per buyer in a keyed grid, two columns unless the shortlist itself is narrower than 34rem (container query); selected card keyed `card-sel-…`. Chat frame: full width, one viewport tall, scroll area takes what the chat box leaves (`flex: 1 1 0; min-height: 0`); below 900px everything flows and the page scrolls. Activity: `render_activity` (one collapsed row) for research, follow-ups, a stopped research run (kept in the message history) and a stopped follow-up (kept in `stopped_followups` for the session). Live runs update only the steps and a caption under the status; the status is updated once, at the end.
+- `src/ma_engine/ui_trace.py` — one step renderer (`show_step`) shared by chat, live view and buyer panel: exact tool name, kind (MCP, LLM, Validation, Calculation, App), status, buyer, round, duration; "Parameters sent" for MCP, "Request details" for LLM; "Raw tool response" (the app-recorded result), "Visible text preview" (first 300 characters only), "Issues found"; reused MCP results and cached LLM responses labelled; a step left running when a response ended shows "Not finished"; truncated previews labelled, full JSON download (`on_click="ignore"`); scrub applied to inputs, outputs, errors and downloads. `LiveSteps` gives each step one slot so `completed` replaces `running`. `activity_label` uses the recorded wall time and says "No new MCP calls" when a follow-up recorded none. Removed `activity_md`, `step_detail_md`, `live_timeline_md`, `buyer_status_lines`, `row_label`, `activity_groups`.
+- `tests/test_app.py` — new assertions for the cards, one activity row per response, step titles, merging, redaction in every output branch, separate identities for equal step numbers, two follow-ups plus a stopped one, and read-only filtering.
+
+Commands and real output:
+- `uv run pytest -q` → `215 passed in 49.48s`.
+- Browser, saved run `20261101-005443` (178 events, 89 steps, one follow-up with 0 MCP calls): completed research shows "Agent activity · Completed · 45.09s" collapsed above the Executive Summary; the follow-up shows "Agent activity · Completed · 9.8s · No new MCP calls" above its answer; `rank_acquirers` shows its parameters and a truncated preview ("first 20,000 of 119,381 characters") with a download. 1280px panel open: chat 603px, chat box 16px below the scroll area, page overflow 0 both ways. 390px panel open: one-column shortlist, chat box after the content, horizontal overflow 0.
+- Running and failed states were checked with a temporary replay page (not in the repo) that feeds the saved events through `LiveSteps`: 61 events gave 44 rows (44 distinct steps, 27 running); the user's open/closed choice held across later events; at completion the status collapsed once to the final label; on failure 17 completed and 27 "Not finished" rows, no "Running".
+
+Open:
+- Running and failed states were verified with replayed events, not a live research run (no paid calls).
+- A stopped research run started from Edit target is kept in the message history, which is drawn on the compose page only.
+- Live view shows at most 50 steps while running; all are listed (paged) when it finishes.
+- LLM steps record metadata and a 300-character visible preview only; full model responses are not recorded.
+
+## Banker-facing report and citation review — 2026-11-01
+
+Implemented the owner's approved review on top of the existing UI changes. Baselines for the six main edited files are in ignored `work/review-baseline/`; previous local edits were preserved.
+
+Changes:
+- `ranking.py`: production shortlist/reserves now follow score order; the old three-per-type policy remains a sensitivity scenario. Strategic alternatives are listed separately. Counts now carry their exact contributing closed-deal IDs.
+- `clients/data_client.py`: ranking statistic registry uses those exact IDs and records buyer, sector/relevant sectors, closed-only and size-band filters. No model calculations.
+- `guardrails.py`: sample-only prose binds n to its explicitly cited statistic instead of a broader tool sample; an adjacent-only claim with direct-sector evidence is rejected. Markdown executive summary shows the first three ranks with verification labels; offline sources remain available.
+- `prompts/research_writer.md`: evidence-led summary/conviction, concise precedents and comps, no raw IDs or scores in headline prose, no unsupported inference from timing, bidders, financing or platform history. All six sections and at least two risks retained.
+- `ui_report.py`: rank-preserving executive comparison, evidence counts on buyer cards, verification separated from attractiveness. Standardized transaction/statistic previews, explicit missing data, supporting risk fields, technical IDs in disclosure. Legacy count citations with broader evidence are labeled honestly, not silently recalculated. Stored report text/statuses unchanged.
+- `app.py`: saved run/buyer/tab URLs restore existing results without MCP or LLM calls. Invalid/deleted links show a safe notice. Strategic alternatives use a collapsed section. Existing sidebar, report controls and activity UI retained.
+- Documentation and tests updated for score-order policy, exact evidence, sample-size regression, verification/rank separation and URL restoration.
+
+Browser evidence:
+- Browser plugin not available; Playwright used. Initial localhost:8501 check caught stale imported helpers in the running Streamlit process; restart resolved it.
+- Saved run `20261101-014527`, desktop 1440×1000: title/content render, no framework error, zero horizontal overflow. Score Breakdown changes URL to `tab=score`; browser Back restores Report.
+- Continued in an isolated browser context on localhost:8502 to avoid interfering with the owner's open tab. Citation [2] opens on hover at 380×320, scrolls internally, and closes after moving away. Its legacy broader-evidence warning and unchanged count were inspected.
+- 390×844: meaningful content, zero horizontal overflow, zero framework exceptions. Browser console: zero errors/warnings.
+- No new paid LLM run; historical prose remains historical. New generation quality still needs the owner's next research run. Automated tests use mocks.
+
+Final validation: `.venv/bin/pytest -q` → **239 passed in 62.66s**. `git diff --check` and `.venv/bin/python -m compileall -q src/ma_engine` passed. No saved research outputs were regenerated or deleted.
+
+## Expandable research stages — 2026-11-01
+
+Owner approved the stage-first activity layout. `ui_trace.py` now partitions each recorded step into one research stage (ranking, buyer research, valuation, writing/checking) or the technical event log. Completed activity retains one outer expander, buyer filter and run totals; each stage expands to its actual calls, readable parameters, Input JSON and recorded output. Valuation summaries quote stored median/sample displays. Final report counts use saved verification statuses; earlier repaired checks are distinguished from unresolved latest checks. Warnings/failures label the stage even while collapsed. LLM outputs retain the honest 300-character preview label. Cached responses are counted and labeled; no research is replayed by viewing activity.
+
+`app.py` uses the same grouping for live progress through `LiveSteps`, updating each call in place. `agent.py` stage metadata includes tool-choice/committee events and renames the valuation stage to Retrieve valuation comparisons. Follow-ups retain their own separate activity. No backend research logic or stored outputs changed.
+
+Tests cover step partitioning, running/completed deduplication, repaired versus unresolved checks, existing redaction and read-only saved-run interaction. Browser: isolated Playwright session on localhost:8502, saved run 20261101-014527; opened activity → valuation stage → Blackstone tool → raw response. Verified actual parameters, stored 12.1x (n=10), visible JSON, zero app exceptions and zero horizontal overflow; console clean. Existing saved runs work without regeneration. Live generation exercised with mocked LLM/MCP in the app tests, not paid calls.
+
+Final checks: `.venv/bin/pytest -q` → **241 passed in 66.42s**; compileall and `git diff --check` passed. Narrow 390×844 activity/raw-output view also had zero horizontal overflow and no app exceptions. Main app restarted on port 8501 with the updated modules; temporary port 8502 server stopped.
+
+## Follow-up response totals — 2026-11-01
+
+The owner identified missing usage totals for the second answer in run 20261101-125440. Its followups.json already records 4.13s, 2 LLM calls, 0 MCP calls, 68,930 input tokens, 527 output tokens, cost $0.007157 and 0 cache hits. The activity renderer gated totals behind the original-research-only run_totals flag.
+
+Added an explicit Response totals expander for each saved follow-up and immediately after a live follow-up completes. It reuses render_totals and labels the scope as this response only, excluding the original run and other answers. Missing saved totals retain the existing unavailable message. No new model/tool calls, recalculation or saved-file changes. Added regression assertions for separate response totals and costs across two answers.
+
+Validation: tests/test_app.py → 31 passed, 1 skipped in 20.11s; git diff --check passed. Targeted follow-up test rerun after adding immediate live-completion totals.
+
+
+## Full question checklist audit — 2026-11-01
+
+Exercised all 75 cases in ma_agent_test_questions.md: 54 live follow-ups through the real engine/MCP/LLM, 16 core/input cases including four complete research runs, and five isolated mocked failure simulations. Baseline follow-ups were appended to requested saved chat 20261101-125440; original four answers/sources backed up first. Revised-context retests were isolated under work/question-audit/retest-run and final-run, preserving original history and citation numbering. That saved run is $150M, not $200M.
+
+Changes: added followup_context.py to expose separately cited original run metadata, exact source-number mappings, selected full reports, recent conversation references and original evidence; engine loads saved follow-up context. Added ST-RUN source handling and safe rendering. Fixed integer source_ids counts in recorded activity crashing the evidence walker, and structural buyer-count context. Request parsing rejects unsupported explicit constraints and maps average margins to no strong-margin preference. Tool results distinguish complete versus truncated row lists. Writer/follow-up instructions reinforced scope, current-activity uncertainty, outcomes and statistics citations. app.render_activity now skips hidden timeline work until the expander is opened; tests verify saved activity opening never replays the engine.
+
+Independent CSV checks: 500 transactions through 2024; Blackstone 22 closed transactions; ten closed HCS transactions in $100M–$400M, all with EBITDA/revenue multiples; displayed medians 12.1x and 2.9x; Evergreen Care Solutions $299.0M / 14.6x. Detailed evidence and all question verdicts: work/question-audit/AUDIT.md, review-verdicts.json, independent-truth.json and accompanying raw JSONL/events.
+
+Review outcome: 43 pass, 9 partial, 8 fail, 7 limited/unsupported, 3 defaulted-input cases, 5 passing failure simulations. Do NOT equate model Verified status with answer completeness. Latest core runs 20261101-131650, 131807, 131929, 132033 have 9/10, 9/10, 8/10, 8/10 verified reports. Remaining defects include report truncation/schema/citation failures, adjacent-sector coverage omitting buyers, withdrawn follow-up losing filter scope, unsupported exclusion promises, and citation [3] explanation misbinding. These were not hidden or made to pass by relaxing checks. This is not an assessment-readiness sign-off.
+
+Validation: .venv/bin/pytest -q => 246 passed, 1 skipped in 64.24s; git diff --check passed. Previous Playwright checks on localhost:8501 verified saved-run load, Next buyer URL/report update and opening stage activity/totals, with no app exceptions or error-console messages. At owner request retried the visible in-app browser; connection returned browser.user is unavailable. No further in-app browser interaction, final responsive QA or download-delivery check claimed. Server remains on 8501 with updated modules. No commits made; pre-existing changes preserved.
+
+## Checklist remediation and selectable-model compatibility — 2026-11-01
+
+Implemented capability-based OpenRouter request adaptation: tool-support preflight, native structured output or locally validated JSON fallback, advertised output caps, unified reasoning/on-off handling, and provider Retry-After cooldowns. Selected-model identity remains in cache keys; truncated responses are not cached. Research can continue after truncation within the existing round bound. A single repair can replace failing sections while preserving valid sections; the complete merged report still undergoes all checks. No guardrail checks were relaxed in this remediation.
+
+Follow-up improvements retain prior tool filters, distinguish user-supplied comparison targets from saved targets, add computed coverage checks, expose source membership and catalogs, and handle read-only source/download UI questions from actual saved state. Thirteen affected follow-up cases now have verified, reviewed targeted results; raw artifacts are refined.jsonl, actions.jsonl and comparison.jsonl under work/question-audit. Four fresh complete research scenarios were rerun with the selected nvidia/nemotron-3.5-super-vl:free model; see REMEDIATION.md and capability-core.jsonl for actual results. Full-report citation, sample-size and wording failures remain visible. This is not an all-pass or assessment-readiness sign-off, and model interchangeability does not guarantee equal answer quality. Non-tool-capable models cannot run this tool-dependent workflow.
+
+Validation: full automated suite 268 passed, 1 skipped in 69.45s; a subsequent additional capability-order test plus agent suite gives 36 passed. Source/tests/README whitespace checks pass. Server restarted on 8501 and health endpoint returns ok. In-app browser retrieval again returned browser.user is unavailable; no fresh browser QA or Playwright fallback claimed. Original history and pre-existing working-tree edits preserved; no commits.
+
+## Sidebar session list — 2026-11-01
+
+Removed the six-session cap from the sidebar; all saved sessions now render newest first in the existing scrollable list. Removed the short-viewport override that made the whole sidebar scroll, preserving the fixed header and History/About footer. Validation: existing sidebar navigation AppTest passed; source whitespace check passed. No browser visual check claimed.
+
+## Follow-up length rejection — 2026-11-01
+
+Removed the arbitrary six-statement FollowupAnswer schema cap and changed the prompt to prioritize a complete answer with concise prose. Longer answers now parse without truncating or dropping claims; every statement still undergoes the unchanged evidence checks. Fixed the UI fallback that duplicated the Not verified status and diagnostics when no structured answer was available. Existing saved failures are preserved; retrying uses the updated schema and prompt. Regression checks cover ten-statement acceptance, rejection of an unsupported source within that longer answer, and a single failure status in the UI. Validation: 44 passed, 1 skipped across follow-up quality and app tests; scoped whitespace check passed.
+
+## Preserve submitted questions across refresh — 2026-11-01
+
+Found that initial questions existed only in Streamlit state until research completed, and follow-ups were appended only after their answer completed. Added a small submissions journal under outputs/runs/_submissions, with one atomically replaced JSON file per request. Initial questions are saved before parsing and receive a History URL while processing; follow-ups are saved before client construction/network work. Completion hides the journal entry only after the existing result-save path succeeds. Errors/cancellation preserve the question as unfinished, without claiming a worker remains alive or automatically rerunning calls.
+
+Unfinished new questions appear in the sidebar and History. Unfinished follow-ups appear in their saved research chat and History. Deleted research runs do not reappear through their follow-up journal entries. This does not introduce a background worker or promise that generation continues after refresh. Previously unsaved text cannot be recreated by this change.
+
+Targeted validation: 37 passed, 1 skipped for persistence and app tests; two subsequent fresh-session/sidebar checks passed. The missing-key test now expects a saved submitted question but no research report, matching the new persistence contract. No evidence or answer checks changed.
+
+Full regression suite after the persistence changes: 275 passed, 1 skipped in 67.19s. Scoped whitespace checks passed. No new live model calls or browser visual verification claimed.
+
+## Startup output clarity — 2026-11-01
+
+Added watchdog to project dependencies and lockfile, removing Streamlit's optional macOS file-watcher installation hint. make run now explains the existing on-demand stdio MCP connection and that it has no HTTP /mcp endpoint. Verified actual make run startup without the hint, then make stop; left the app stopped as it was before this check. No MCP transport change.
+
+## OpenAI strict-schema compatibility and failed-run citations — 2026-11-01
+
+Investigated saved run 20261101-152939 with openai/gpt-6.1-terra. Actual provider probes identified two HTTP 400 causes: description beside a $ref in ReportDraft.summary, and missing defaulted include_source_catalog in FollowupAnswer.required. The strict-schema adapter now inlines referenced fields carrying sibling metadata and lists all object properties as required. Local schemas/defaults and evidence checks remain unchanged. Both request forms were accepted after the fix; follow-up parsed successfully. A targeted Blackstone run reused successful cached research and made a fresh writing call: verified with no issues or repair. No other model configuration, ranking or prompt changes.
+
+The failed run's sources registry was empty because it was built solely from report drafts while UI summaries still cited ranking statistics. Added append-only source completion for the displayed buyers' three ranking counts at save/load. Backed up and repaired that run's source registry (30 entries); raw bracketed ST-RANK fallback no longer appears in the rendered summary. Failed historical report statuses/narratives were preserved. Details and isolated live results: work/model-compatibility/FINDINGS.md and blackstone-result.json.
+
+Validation: 278 passed, 1 skipped in the complete automated suite; scoped whitespace checks passed. No new browser visual verification claimed. One-buyer live success is not an all-model or full-ten-buyer guarantee.
+
+## Application terminal logs and Claude compatibility check — 2026-11-01
+
+Added a dedicated INFO terminal logger for existing activity events: start/end, model, buyer, tool name, timing, usage/cost/cache metadata and failures. Logs do not include input prompts or response payloads; configured API key is redacted and newline injection is removed. Provider nested error.message is now extracted into safe error text so schema rejection details appear in activity and terminal logs. Retry delay/attempt messages are logged as they happen. No research, scoring or verification behavior changed.
+
+Validation: activity/agent/logging suites 67 passed; final retry/redaction checks 3 passed. A minimal live structured follow-up request to anthropic/claude-haiku-5.5 was accepted and parsed successfully. Earlier same-adapter OpenAI gpt-6.1-terra Blackstone test produced a verified report. These establish tested request compatibility, not identical financial-answer quality across models or support for non-tool models. README documents terminal logging. No app restart or new full research run performed.
+
+## Delete unfinished requests — 2026-11-01
+
+Added the same sidebar trash-button layout and confirmation dialog to unfinished request entries, plus a delete action in History. Cancel preserves the request; confirmed deletion removes its saved question. Submission finish/delete writes share a file lock, and a late finish cannot recreate a deleted journal entry. This removes the saved unfinished request; it does not add cancellation of an already-running model task. Tests cover both entry points, cancel, deletion surviving a new app session, path validation, and late completion. Existing completed-session deletion is unchanged.
