@@ -43,7 +43,7 @@ def test_full_run_saves_ten_reports_trace_and_server_log(runs_dir, monkeypatch):
 
     run_dir = runs_dir / run["run_id"]
     assert sorted(p.name for p in run_dir.iterdir()) == [
-        "mcp_server.log", "reports.json", "reports.md", "trace.json"]
+        "mcp_server.log", "ranking.json", "reports.json", "reports.md", "trace.json"]
     assert not list(runs_dir.glob(".mcp_server-*"))
     saved, loaded = guardrails.load_reports(run_dir)
     assert loaded == reports and saved["target"] == config.DEFAULT_TARGET
@@ -60,8 +60,9 @@ def test_full_run_saves_ten_reports_trace_and_server_log(runs_dir, monkeypatch):
                    for c in buyer["tool_calls"])
     assert trace["quality"]["summary"]["full_report_count"]
     assert trace["quality"]["summary"]["all_reports_verified"]
-    assert events[0] == "Ranking buyers" and "Committee review" in events
-    assert events[-1].startswith("Saved run")
+    messages = [e["message"] for e in events]
+    assert any(m.startswith("Ranked ") for m in messages) and any("Committee review" in m for m in messages)
+    assert messages[-1].startswith("Saved run")
 
 
 def test_missing_processed_data_and_raw_csv(tmp_path, monkeypatch):
@@ -122,7 +123,7 @@ def test_one_buyer_failure_is_substituted_and_saved(runs_dir, monkeypatch):
     assert trace["errors"][0]["partial_trace"]["tool_calls"]
     markdown = (runs_dir / run["run_id"] / "reports.md").read_text()
     assert "Replaced GTCR after an error" in markdown
-    assert any(e.startswith("Substituting") for e in events)
+    assert any(e["message"].startswith("Substituting") for e in events)
 
 
 def test_malformed_model_output(runs_dir, monkeypatch, capsys):

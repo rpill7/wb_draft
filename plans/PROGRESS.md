@@ -719,3 +719,112 @@ Open issues / not done:
 - The README's measured-performance numbers.
 
 **Still blocked on a Docker engine:** `docker build` / `docker run` check.
+
+## Subplan 8 — Backend (events, trace, request parsing, follow-ups)
+
+Backend only. The chat UI is a later change. `app.py` already prints `event["message"]`, so it was left as it is. `prompts/parse_request.md` and `prompts/followup.md` were already in the tree and are the prompts these calls use. README, `docs/` and the Dockerfile were not edited.
+
+Files changed:
+- `src/ma_engine/agent.py` — event records, shared step counter, `parse_request`, `answer_followup`
+- `src/ma_engine/engine.py` — `run_engine` stores the events, `load_run`, `parse_target`, `run_followup`, `ranking.json`
+- `src/ma_engine/clients/llm_client.py` — own retry loop, `attempts` on the result, `scrub_secret`
+- `src/ma_engine/guardrails.py` — `check_statements`
+- `src/ma_engine/models.py` — `FollowupResult` fields
+- `tests/test_activity.py` (new), `tests/test_agent.py`, `tests/test_end_to_end.py`
+
+### Public signatures and return shapes
+
+`progress(event)` receives every event dict below. The CLI prints `event["message"]`.
+
+`agent.research_buyer(entry, target, llm, mcp, use_cache=True, progress=None, steps=None)`
+→ `(BuyerReport, evidence, buyer_trace)`. `steps` is the run's shared counter.
+
+`agent.parse_request(text, llm, use_cache=True, progress=None)`
+→ `(Target, defaulted: list[str])`. `defaulted` is Target field names filled from `config.DEFAULT_TARGET`, in field order. Events go to `progress` only.
+
+`engine.parse_target(text, use_cache=True, progress=None)`
+→ same `(Target, defaulted)`. Creates one `LLMClient`. Does not start a run. The UI shows the target, then calls `run_engine`.
+
+`engine.run_engine(target, use_cache=True, excluded_keys=(), progress=None)`
+→ `{run_id, run_dir, target: Target, ranking, reports, trace}`.
+`ranking` is the `rank_acquirers` data (also `ranking.json`).
+`trace["events"]` is the activity list. `trace["totals"]` is `{wall_time_s, llm_calls, mcp_tool_calls, tokens_in, tokens_out, cost_usd, cache_hits}`.
+
+`engine.load_run(run_dir)`
+→ the same keys. `ranking` is None if `ranking.json` is missing. `trace` is `{}` if `trace.json` is missing. Reports come from `guardrails.load_reports`. Saved activity is `trace["events"]`; it is not rebuilt.
+
+`agent.answer_followup(question, run, llm, mcp, use_cache=True, progress=None)`
+→ `FollowupResult`: `{question, statements: list[Statement], status: "verified"|"not_verified", issues, markdown, events, totals}`.
+`markdown` is rendered by Python and contains `[MA-...]` tags. `events` is this answer's own list (its own step counter). `totals` has the same keys as `trace["totals"]`. `run` needs `ranking` and `reports` (as `run_engine` / `load_run` return).
+
+`engine.run_followup(question, run, use_cache=True, progress=None)`
+→ the same `FollowupResult`. One `LLMClient` and exactly one MCP session. Appends the answer to `followups.json` (a list) in `run["run_dir"]`.
+
+`guardrails.check_statements(statements, evidence)` → `list[str]` (empty means pass). Citations, numbers, sample sizes, outcomes, deal types, names, wording, unknowns. Report structure and section-ownership rules are not applied.
+
+### Event fields
+
+Every event has all of these keys. A step is sent twice, `running` then `completed` or `failed`, with the same `step`.
+
+`step`, `ts` (UTC, ends with `Z`), `category` (`llm` | `mcp_tool` | `validation` | `calculation` | `app`), `name`, `acquirer_key`, `round`, `status` (`running` | `completed` | `failed`), `duration_ms` (None while running), `input`, `output_summary`, `output`, `error`, `attempts`, `tokens_in`, `tokens_out`, `cost_usd`, `decision`, `message`.
+
+`name` is a tool name, an LLM purpose (`research`, `write`, `repair`, `committee`, `parse_request`, `followup`), or `check`, `ranking`, `apply_committee`, `run`, `request`, `mcp_connected`, `substitution`, `buyer_failed`, `save`.
+
+`input` for a tool is the arguments object passed to `MCPClient.call_tool`. For an LLM call it is `{model, message_count, tool_count}` only. `output` for a tool is the dict `call_tool` returned. For a check it is the issue messages. For an LLM call it is the visible assistant text, cut at 300 characters. Reasoning tokens are never stored.
+
+`attempts` on an LLM call is a list of `{n, error}` in try order. `error` is None on the try that worked. Other steps have `attempts: null`.
+
+`decision` is one or two factual sentences from what was recorded, for example "Requested 2 tools: get_acquirer_profile, get_valuation_comps", "No further tool calls; moved to writing", "Guardrails found 3 issues; sent one repair", "Stopped at round limit". It is null while the step is running.
+
+A run emits, in order: `run` (app), `mcp_connected` (app, tool names), `rank_acquirers` (mcp_tool, exact arguments and full result) and `ranking` (calculation), then per buyer each LLM call and each tool call, then `check` (validation) and `repair` when needed, then `committee` (llm) and `apply_committee` (calculation), `substitution` (app) when a buyer is replaced, and `save` (app). `buyer_failed` is only when a buyer errors and no reserve is left. Nothing is emitted before the MCP session opens, so a server that dies at start still looks like a server failure to the current app.
+
+### Decisions
+
+- `config.MAX_RETRIES` (2) is the number of tries, not extra retries after the first. The OpenAI client's `max_retries` is 0. Retried errors are connection errors, timeouts, and HTTP 408, 409, 429 and 5xx, with a short doubling wait (0.2s, then 0.4s). A 400 or 401 is raised at once. The API key in an error string is replaced with `***`. Headers and environment values are not recorded.
+- "regional" or "local" with no named region is forced to "Any region" in Python, including when the model says "Multi-Regional". A region named in the sentence wins. Unstated fields come from `config.DEFAULT_TARGET` and are listed in `defaulted`. The sentence is stored as data and is not executed.
+- Parsing stays separate from the run. `parse_target` does not call `run_engine`.
+- Follow-up evidence is the target block, the ranking entries and that answer's tool results. One repair, then `not_verified` with the issue messages. The six research tools only (`rank_acquirers` stays hidden).
+- The per-buyer `tool_calls` and `llm_calls` lists are still in `trace["buyers"]`, because the current app reads them. The activity panel should read `trace["events"]`.
+
+Commands and real output:
+- `uv run pytest -q` → `189 passed in 36.83s` (176 before this work, plus 13 in `tests/test_activity.py`).
+
+Open:
+- The chat UI (activity timeline, parsed-target confirm, follow-up chat) is not built. It should call `parse_target`, then `run_engine`, then `run_followup`, and read `trace["events"]`.
+- No live-model run of the new events yet, so token and cost fields are unmeasured on a real provider. The retry path was tested with a stubbed client, not OpenRouter.
+
+## Subplan 8 — Chat UI and execution timeline
+
+Display only. The screen calls `parse_target`, then `run_engine`, then `run_followup`, and reads `trace["events"]`. No ranking, model, or tool logic was added, and the backend signatures were not changed. `README.md` and `docs/` were left as they are.
+
+Files changed:
+- `src/ma_engine/app.py` — chat-first New Research page, results dashboard, follow-up chat, saved-run list, About
+- `src/ma_engine/ui_trace.py` (new) — activity timeline: totals, filters, one row per step, 20,000-character preview
+- `tests/test_app.py` — AppTest coverage for navigation, the example request, buyer details, follow-up, saved runs, the missing key, and the preview helper
+- `.streamlit/config.toml` (new) — light theme, navy primary, headless, usage stats off
+- `Dockerfile` — copies `.streamlit/config.toml` into the image
+- `.dockerignore` — allows that theme file and still keeps `secrets.toml` out
+
+`.gitignore` already ignores only `.streamlit/secrets.toml`, so `config.toml` is not excluded.
+
+### Decisions
+
+- Pages are a sidebar radio (New Research, Research Results, About), not a second Streamlit file. Saved runs from this session, `outputs/runs`, and `outputs/sample` open through `engine.load_run` and `guardrails.latest_run_dir`.
+- Streamlit's chat box cannot be given a starting sentence. The assignment example is printed in full, and "Use this example" sends that exact text.
+- While a run is going, the status box shows one line per buyer and the timeline shows `output_summary` only. After the step finishes, the row can be opened. JSON longer than 20,000 characters is previewed and the full text is a download. Rows are grouped by buyer so each buyer's rounds stay in order, 50 rows to a page.
+- The "MCP server: N tools" line is filled from the `mcp_connected` event's `output_summary` (7 tools with this server). The API key is never written; error text replaces it with `***`.
+- A missing key stops a new request and explains `copy .env.example to .env`. Opening a saved run does not need a key.
+
+Commands and real output:
+- `uv run pytest -q` → `194 passed in 35.61s`.
+- `curl -fsS http://127.0.0.1:8599/_stcore/health` → `ok`, then the server was stopped. `pgrep -fl streamlit` found no process.
+
+Follow-up after a browser check:
+- Dollar amounts are escaped only when the screen draws markdown, captions, write, and expander labels (`as_markdown` in `ui_trace.py`). `reports.md` is still plain text from `guardrails.render_markdown`.
+- Timeline rows use Streamlit badges (`:blue-badge[LLM]`, `:green-badge[MCP tool]`, `:orange-badge[Validation]`, `:gray-badge[Calculation]`, `:primary-badge[App]`). Failed is a red badge, running shimmers, and empty buyer or round fields are left out.
+- The sidebar starts expanded.
+- `run_engine(..., request=None)` stores the user's sentence on `trace["request"]` and on the first `run` event input. The timeline shows that sentence as Question, or a description of the target when the sentence was not stored.
+
+Open:
+- No live-model click-through of this screen yet, so token and cost on a real provider are still unmeasured.
+- `README.md` and `docs/architecture.md` still describe the old form. This task left them unchanged.

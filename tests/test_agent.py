@@ -441,7 +441,8 @@ async def test_engine_full_run_saves_guardrails_shape(runs_dir, monkeypatch, cap
     trace = json.loads((run_dir / "trace.json").read_text())
     assert len(trace["buyers"]) == config.REPORT_COUNT and trace["substitutions"] == []
     assert trace["llm_totals"]["calls"] == len(llm.calls)
-    assert any(e.startswith("Ranked ") for e in events) and events[-1].startswith("Saved run")
+    messages = [e["message"] for e in events]
+    assert any(m.startswith("Ranked ") for m in messages) and messages[-1].startswith("Saved run")
 
     with nullcontext() if trace["quality"]["passed"] else pytest.raises(SystemExit):
         guardrails.main()
@@ -553,7 +554,7 @@ async def test_rate_limit_during_research_stops_without_substituting(runs_dir, m
     events = []
     with pytest.raises(openai.RateLimitError):
         await engine.run_engine(config.DEFAULT_TARGET, progress=events.append)
-    assert not any(e.startswith("Substituting") for e in events)
+    assert not any(e["message"].startswith("Substituting") for e in events)
     assert not list(runs_dir.glob("*/trace.json"))
 
 
@@ -671,7 +672,7 @@ def test_llm_client_needs_key_and_uses_config(monkeypatch):
     monkeypatch.setattr(config, "LLM_MODEL", "test/model")
     client = LLMClient()._client
     assert str(client.base_url).rstrip("/") == config.OPENROUTER_BASE_URL
-    assert client.max_retries == config.MAX_RETRIES
+    assert client.max_retries == 0
 
 
 def test_prompts_fill_every_placeholder():

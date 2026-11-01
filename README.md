@@ -4,7 +4,7 @@ Give it a target company, for example a private Healthcare Services business wor
 
 Python does every calculation. An AI agent picks which data to look at and writes the reports. Every sentence is then checked against the deals it cites.
 
-![The app's start screen](docs/app_start.png)
+You ask in plain English, watch the agent work step by step, browse the results, and ask follow-up questions. Every answer follows the same citation rules.
 
 ---
 
@@ -31,17 +31,21 @@ make data                  # rebuilds the pre-calculated tables (already include
 make run                   # starts the app
 ```
 
-Open the address it prints (usually http://localhost:8501). Keep the defaults and press **Run**.
+Open the address it prints (usually http://localhost:8501). Then:
 
-**What you should see:** a progress box, while it ranks buyers and researches each of the 10 at the same time. Then a ranked table, plus one panel per buyer with four tabs:
-- **Report:** the six-section report.
-- **Source rows:** the original CSV rows behind every cited deal.
-- **Score breakdown:** how the buyer's score was built.
-- **How this was decided:** every tool the AI called, in order, with timings.
+1. **New Research:** press **Use this example**, or type your own request, for example *"Find the 10 most likely acquirers for a regional Healthcare Services company valued at $200M EV with strong EBITDA margins."*
+2. **Check the target.** The app shows what it understood (sector, size, region, ownership, margins) and which values it filled in from defaults. **Adjust target** lets you change them.
+3. **Watch it work.** While it runs, each of the 10 buyers gets a live line showing its current tool and round. The **Agent Activity** timeline lists every step.
+4. **Read the results:** a top-10 table with rank, buyer, type, conviction, verified status and a short reason. Pick a buyer to open five tabs:
+   - **Report:** the six-section report.
+   - **Transaction evidence:** the original CSV rows behind every cited deal.
+   - **Valuation context and risk flags.**
+   - **Score breakdown.**
+   - **Agent activity:** that buyer's own steps.
+5. **Ask follow-up questions,** such as "Why was the top buyer ranked first?" or "Show the supporting transactions for the top buyer". The agent answers by calling the same tools, and the answer is checked like a report.
+6. **Download** `reports.md`, `reports.json` and `trace.json`.
 
-Each run is saved in `outputs/runs/<run_id>/`.
-
-Running the same target again reuses the saved AI answers, so it is fast and free. **Regenerate** asks the AI again.
+Each run is saved in `outputs/runs/<run_id>/`, and any saved run can be opened again from **Research Results**. Running the same request again reuses the saved AI answers, so it is fast and free.
 
 ### Without make
 
@@ -75,7 +79,7 @@ make check                          # quality checks on the latest saved run
 
 ### No API key?
 
-The app still opens. Pressing **Run** explains how to add the key, and you can open any saved run (from `outputs/runs/` or the example in `outputs/sample/`) without a key.
+The app still opens. Sending a request explains how to add the key. You can open any saved run, including its reports, timeline and earlier follow-up answers, from **Research Results** without a key. Saved runs come from `outputs/runs/` and from the example in `outputs/sample/`.
 
 ---
 
@@ -107,7 +111,7 @@ Everything else is in `src/ma_engine/config.py`.
 | A message naming missing files in `data/processed` | Run `make data`. |
 | `requires-python >=3.12` or a Python version error | Use `uv run ...` (or `make`), not your system Python. `uv` brings Python 3.12. |
 | `Port 8501 is already in use` | Stop the other app, or run `uv run streamlit run src/ma_engine/app.py --server.port 8502`. |
-| Rate limit or "Run stopped" message | Wait a minute and press **Run** again. Buyers already finished come from the saved answers. |
+| Rate limit or "Run stopped" message | Wait a minute and send the request again. Buyers already finished come from the saved answers. |
 | `make: command not found` (Windows) | Use the commands under "Without make". |
 
 ---
@@ -130,11 +134,13 @@ flowchart LR
     COMM --> OUT[("outputs/runs/run_id")]
 ```
 
+0. **Read the request (AI + Python).** One AI call pulls the target out of the sentence: sector, size, region, ownership and margins. Python then checks every value against what the data allows. It doesn't guess: "regional" with no region named becomes "Any region", and anything not stated uses the default, listed on screen.
 1. **Prepare (once).** `prepare.py` cleans the CSV. It pre-calculates buyer profiles, sector statistics and valuation tables, and gives every number a ready-to-quote label like `$185.0M` or `13.2x`.
 2. **Rank (Python).** `ranking.py` scores every buyer with a relevant closed deal against the target, then picks the top 10 plus 5 reserves.
 3. **Research (AI).** For each buyer, an agent calls read-only tools on a FastMCP server: buyer profile, deal history, valuation comps, deal search, sector overview. It does up to 4 rounds, then writes a structured report. It never calculates.
 4. **Check (Python).** Every statement is checked against the exact tool results that agent received. A failed report gets the exact error list and one repair attempt. If it still fails, it is shown with a red **Not verified** label, never hidden.
 5. **Review (AI + Python).** One committee call compares all 10 reports. It may move a conviction level up or down by one step, and each change is re-checked.
+6. **Follow-ups (AI + Python).** Questions about a finished run go to an agent with the same tools and the same tool loop. Each answer is a list of labelled statements with deal IDs, checked by the same guardrails. It gets one repair attempt, and is shown as **Not verified** if it still fails. If the data can't answer the question, the answer says so.
 
 Full detail, with two diagrams and a worked example of one number traced from the CSV to the report: **[docs/architecture.md](docs/architecture.md)**.
 
@@ -279,9 +285,26 @@ precedent_activity[0]: "$299.0M" belongs to MA-2021-0195, but the statement cite
 Cite MA-2021-0195 or use the figures for MA-2021-0407 ($341.7M, EV/EBITDA 10.0x, ...).
 ```
 
+## Agent activity (execution trace)
+
+Every step of a run is recorded as it happens, shown live, and saved in `trace.json`. That covers each AI call, each FastMCP tool call, each check, each Python calculation and each app step. The timeline answers five questions in order:
+1. What did the user ask?
+2. Which tool did the agent pick?
+3. What arguments did it pass?
+4. What came back?
+5. What did it do next?
+
+Each row shows:
+- **Basics:** step number, time, a coloured type label (LLM, MCP tool, Validation, Calculation, App), the buyer, the round, the status (running, completed or failed) and the duration.
+- **A short decision summary,** built only from what was recorded. For example: "Requested 2 tools: get_acquirer_profile, get_valuation_comps", "No further tool calls; moved to writing", "Guardrails found 3 issues; sent one repair". It never shows the model's private reasoning.
+- **When you open the row:** the exact input sent and a short summary of the result. The full result follows, collapsed; very large results show a preview plus a download link.
+- **For AI calls:** tokens and cost, plus retry attempts with their errors.
+
+The top of the timeline shows the totals: run time, AI calls, tool calls, tokens, cost and cache hits. You can filter by buyer and by step type. API keys and headers are never recorded, and a test checks for this.
+
 ## Repeatability
 
-The model used here doesn't accept `temperature` or `seed` settings on OpenRouter. So repeatability comes from a **response cache** (`.cache/llm/`): the same request returns the same saved answer, instantly and at no cost. **Regenerate** skips the cache and asks the model again. The ranking, the numbers and the checks are all plain Python, so they are identical every time.
+The model used here doesn't accept `temperature` or `seed` settings on OpenRouter. So repeatability comes from a **response cache** (`.cache/llm/`): the same request returns the same saved answer, instantly and at no cost. To get fresh answers, delete `.cache/llm/`. The ranking, the numbers and the checks are all plain Python, so they are identical every time.
 
 ## Assumptions
 
@@ -311,13 +334,15 @@ The model used here doesn't accept `temperature` or `seed` settings on OpenRoute
 make test
 ```
 
-176 tests. None call a real AI model, and no key is needed. They cover:
+194 tests. None call a real AI model, and no key is needed. They cover:
 - the data step;
 - every tool, including one test through a real FastMCP client;
 - the ranking rules;
 - every guardrail check, including deliberately wrong reports that must fail;
 - the agent loop and error handling;
 - a full end-to-end run against the real tool server with a mocked model;
+- the recorded steps matching the real tool calls exactly (same arguments, same results);
+- reading requests and answering follow-ups;
 - the Streamlit app.
 
 ## Project layout
@@ -335,7 +360,9 @@ src/ma_engine/
   guardrails.py           report checks and rendering
   engine.py               run_engine(target): the full pipeline
   prompts/                prompt text files
-  app.py                  Streamlit app
+  app.py                  Streamlit app (chat, results, follow-ups)
+  ui_trace.py             Agent Activity timeline display
+.streamlit/config.toml    theme (navy, white, light gray)
 tests/                    pytest tests
 outputs/sample/           one example run
 docs/architecture.md      architecture, diagrams, worked example

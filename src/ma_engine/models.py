@@ -57,6 +57,7 @@ Kind = Literal["fact", "interpretation", "unknown"]
 Level = Literal["High", "Medium", "Low"]
 MAX_STATEMENTS = 5
 MAX_RISK_FLAGS = 4
+MAX_ANSWER_STATEMENTS = 6
 
 _IDS = ("Transaction IDs (e.g. MA-2021-0142) from the tool results that support this. "
         "At least one for a fact; empty for unknown.")
@@ -143,6 +144,52 @@ class CommitteeReview(BaseModel):
     similar_pairs: list[SimilarPair] = Field(description="Pairs of buyers whose strategic fit "
                                                          "theses make the same argument; empty "
                                                          "if none.")
+
+
+class FollowupAnswer(BaseModel):
+    """The answer to one follow-up question about a run. Python adds status and issues."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    statements: list[Statement] = Field(
+        max_length=MAX_ANSWER_STATEMENTS, description="The answer, one claim per statement. If "
+                                                      "the data cannot answer the question, one "
+                                                      "unknown statement saying so.")
+
+
+class FollowupResult(BaseModel):
+    """A checked follow-up answer. Citation tags in `markdown` are added by Python.
+
+    `events` uses the same dicts as a run's `trace["events"]` (see `agent.py`).
+    `totals` is `wall_time_s`, `llm_calls`, `mcp_tool_calls`, `tokens_in`, `tokens_out`,
+    `cost_usd` and `cache_hits`.
+    """
+
+    question: str
+    statements: list[Statement]
+    status: Literal["verified", "not_verified"]
+    issues: list[str]
+    markdown: str
+    events: list[dict]
+    totals: dict
+
+
+class RequestFields(BaseModel):
+    """What a banker's request sentence states about the target. null = not stated."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sector: Literal[tuple(SECTORS)] | None = Field(description="The sector, only if stated.")
+    ev_value: float | None = Field(description="The enterprise value exactly as written, without "
+                                               "its unit (for \"$1.2B\" write 1.2).")
+    ev_unit: Literal["million", "billion"] | None = Field(
+        description="The unit written with the enterprise value; null if no value.")
+    ownership: Literal[tuple(OWNERSHIPS)] | None = Field(description="Ownership, only if stated.")
+    geography: Literal[tuple(GEOGRAPHIES)] | None = Field(
+        description=f"A named region, or \"{ANY_REGION}\" for regional or local with no region "
+                    "named; null if the sentence says nothing about geography.")
+    margin_profile: Literal["strong", "any"] | None = Field(
+        description="strong if the sentence asks for strong or above-median EBITDA margins.")
 
 
 class BuyerReport(BaseModel):

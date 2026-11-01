@@ -6,5 +6,9 @@
 !.python-version
 !src/
 !data/raw/
+# Theme file only. .streamlit/secrets.toml stays out of the image.
+!.streamlit/
+.streamlit/*
+!.streamlit/config.toml
 **/__pycache__
 **/*.pyc

@@ -55,7 +55,7 @@ from typing import NamedTuple
 
 from ma_engine import config
 from ma_engine.clients.data_client import get_client
-from ma_engine.models import BuyerReport, ReportDraft
+from ma_engine.models import BuyerReport, ReportDraft, Statement
 from ma_engine.prepare import CLOSED, KNOWN_VALUES, NON_CLOSED_OUTCOMES
 
 ID_PATTERN = re.compile(r"MA-\d{4}-\d{4}")
@@ -620,23 +620,85 @@ def _check_unknown(item: Item) -> list[str]:
     return issues
 
 
+def _check_item(item: Item, evidence: Evidence) -> list[str]:
+    """Statement-level checks. Section rules apply only to report sections."""
+    if item.kind == "unknown":
+        issues = _check_unknown(item)
+    else:
+        issues = (_check_citations(item, evidence) + _check_buyer_ids(item, evidence)
+                  + _check_numbers(item, evidence) + _check_sample_sizes(item, evidence)
+                  + _check_outcomes(item, evidence) + _check_deal_types(item, evidence))
+    return (issues + _check_wording(item, evidence) + _check_valuation(item, evidence)
+            + _check_names(item, evidence))
+
+
 def check(report: BuyerReport, evidence: Evidence) -> list[str]:
     """Every guardrail problem in the report, as fix-oriented messages. Empty list = pass."""
     issues = _check_structure(report, evidence)
     for item in _items(report.draft):
-        if item.kind == "unknown":
-            issues += _check_unknown(item)
-        else:
-            issues += _check_citations(item, evidence)
-            issues += _check_buyer_ids(item, evidence)
-            issues += _check_numbers(item, evidence)
-            issues += _check_sample_sizes(item, evidence)
-            issues += _check_outcomes(item, evidence)
-            issues += _check_deal_types(item, evidence)
-        issues += _check_wording(item, evidence)
-        issues += _check_valuation(item, evidence)
-        issues += _check_names(item, evidence)
+        issues += _check_item(item, evidence)
     return issues
+
+
+# ---------- follow-up answers ----------
+
+def build_answer_evidence(target: dict, entries: list[dict], tool_results: list[dict]) -> Evidence:
+    """Evidence for a follow-up answer: the target block, the run's ranking entries and the
+    results of this answer's tool calls. No buyer owns the answer, so every buyer name must
+    belong to a cited deal and no source is limited to one section."""
+    results = [call["result"] for call in tool_results]
+    text = "\n".join(_texts([target, entries, results]))
+    sources, figures = [], {}
+    _walk(target, frozenset(), "target", "", sources, figures)
+    for entry in entries:
+        ids = frozenset(entry.get("supporting_closed_ids", []) + entry.get("weak_signal_ids", []))
+        _walk(entry, ids, "buyer", entry["acquirer_key"], sources, figures)
+    _walk(results, frozenset(), "comp", "", sources, figures)
+    return Evidence(
+        acquirer_key="", display_name="", starting_level="",
+        allowed_ids=frozenset(ID_PATTERN.findall(text)),
+        allowed_numbers=frozenset(number_tokens(text)),
+        allowed_names=frozenset(company_names(text)),
+        outcomes=_outcomes(), sources=tuple(sources),
+        buyer_ids=frozenset(i for s in sources if s.kind == "buyer" for i in s.ids),
+        own_names=frozenset(), target_names=frozenset(company_names("\n".join(_texts(target)))),
+        figures=figures, deals=_deals(),
+    )
+
+
+def check_statements(statements: list[Statement], evidence: Evidence) -> list[str]:
+    """Statement checks only. Report structure and section-ownership rules are not applied.
+
+    The checks that do run are citations, claim-to-source numbers, sample sizes, outcomes,
+    deal types, company names, wording and unknowns. `evidence` is whatever the caller built
+    (for a follow-up: the target block, the ranking entries and this answer's tool results).
+    An empty list means the statements passed.
+    """
+    if not statements:
+        return ["answer: is empty. Add at least one statement, or one unknown statement saying "
+                "the data cannot answer the question."]
+    issues = []
+    for i, s in enumerate(statements):
+        item = Item(f"answer[{i}]", "answer", s.text, s.kind, s.source_ids)
+        if not s.text.strip():
+            issues.append(f"{item.location}: text is empty. Write the statement or remove it.")
+        issues += _check_item(item, evidence)
+    return issues
+
+
+def check_answer(statements: list[Statement], evidence: Evidence) -> list[str]:
+    """Same as `check_statements`."""
+    return check_statements(statements, evidence)
+
+
+def render_answer(statements: list[Statement], status: str, issues: list[str]) -> str:
+    """A follow-up answer as Markdown. Citation tags come from source_ids only."""
+    lines = [f"**Status:** {'Verified' if status == 'verified' else 'Not verified'}"]
+    if status != "verified":
+        lines += ["", "> **Not verified.** This answer did not pass the guardrail checks:",
+                  *[f"> - {issue}" for issue in issues]]
+    lines += ["", *[f"- {_line(s.text, s.kind, s.source_ids)}" for s in statements]]
+    return "\n".join(lines) + "\n"
 
 
 def apply_check(report: BuyerReport, evidence: Evidence) -> BuyerReport:

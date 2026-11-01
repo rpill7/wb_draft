@@ -1,8 +1,12 @@
 """OpenRouter chat client: one per run, with a disk cache, usage and cost, structured output.
 
-Requests go through the `openai` library pointed at OpenRouter. The library's own retry
-handles temporary failures only (connection errors, timeouts, 408, 409, 429 and 5xx, with
-exponential backoff); business errors such as 400 or 401 are raised at once.
+Requests go through the `openai` library pointed at OpenRouter. The library's own retries are
+off (`max_retries=0`). This client retries temporary failures itself: connection errors,
+timeouts, and HTTP 408, 409, 429 and 5xx, with a short exponential backoff, up to
+`config.MAX_RETRIES` attempts. Business errors such as 400 or 401 are raised at once.
+Each attempt's error text is returned on the result (or on the exception if every attempt
+fails) so the activity event can record it. The API key, response headers and environment
+values are never included.
 
 Structured output uses `response_format` json_schema with `strict: true` and
 `provider.require_parameters: true`, so OpenRouter routes only to providers that support every
@@ -21,6 +25,7 @@ import os
 import time
 from dataclasses import dataclass, field
 
+import openai
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ValidationError
 
@@ -54,6 +59,8 @@ class LLMResult:
     duration_ms: int = 0
     dropped_parameters: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # One entry per try: {"n": 1, "error": None} on success. `error` is the safe text of a failure.
+    attempts: list[dict] = field(default_factory=lambda: [{"n": 1, "error": None}])
 
     def assistant_message(self) -> dict:
         """This response as a chat message, to append to the conversation."""
@@ -87,6 +94,32 @@ def strict_schema(model: type[BaseModel]) -> dict:
     return schema
 
 
+def scrub_secret(text: str) -> str:
+    """The text with the API key removed. Safe to store in a trace or an event."""
+    secret = config.OPENROUTER_API_KEY
+    if secret and secret in text:
+        text = text.replace(secret, "***")
+    return text
+
+
+def _public_error(exc: Exception) -> str:
+    """Error text for an event: type and message only, never headers or the API key."""
+    return scrub_secret(f"{type(exc).__name__}: {exc}")
+
+
+def _retryable(exc: Exception) -> bool:
+    """Connection errors, timeouts, and HTTP 408, 409, 429 and 5xx."""
+    if isinstance(exc, openai.APIConnectionError):
+        return True
+    status = getattr(exc, "status_code", None)
+    return status in (408, 409, 429) or (isinstance(status, int) and 500 <= status <= 599)
+
+
+def _backoff(attempt: int) -> float:
+    """Seconds to wait after a failed attempt, before the next one. Short, and it doubles."""
+    return 0.2 * (2 ** (attempt - 1))
+
+
 def _parse(content: str | None, schema: type[BaseModel]) -> tuple[BaseModel | None, str | None]:
     text = (content or "").strip()
     # Some providers wrap JSON in a Markdown fence even in json_schema mode.
@@ -104,7 +137,7 @@ class LLMClient:
     def __init__(self, client: AsyncOpenAI | None = None):
         self._client = client or AsyncOpenAI(
             base_url=config.OPENROUTER_BASE_URL, api_key=config.require_api_key(),
-            timeout=config.REQUEST_TIMEOUT_S, max_retries=config.MAX_RETRIES)
+            timeout=config.REQUEST_TIMEOUT_S, max_retries=0)
         if not config.LLM_MODEL:
             raise LLMConfigError("LLM_MODEL is not set. Copy .env.example to .env and set the "
                                "OpenRouter model id, for example anthropic/claude-sonnet-5.5.")
@@ -144,7 +177,9 @@ class LLMClient:
             raw = json.loads(path.read_text(encoding="utf-8"))
         else:
             raw = await self._call(request)
-        result = LLMResult(content=raw["content"], tool_calls=raw["tool_calls"], cache_hit=cached)
+        attempts = raw.pop("attempts", None)
+        result = LLMResult(content=raw["content"], tool_calls=raw["tool_calls"], cache_hit=cached,
+                           attempts=attempts or [{"n": 1, "error": None}])
         if response_schema is not None:
             result.parsed, result.parse_error = _parse(result.content, response_schema)
         if not cached:
@@ -171,7 +206,7 @@ class LLMClient:
                 "name": request["schema"].get("title", "output"), "strict": True,
                 "schema": request["schema"]}}
             kwargs["extra_body"] = {"provider": {"require_parameters": True}}
-        response = await self._client.chat.completions.create(**kwargs)
+        response, attempts = await self._create(kwargs)
         if not response.choices:
             raise RuntimeError(f"OpenRouter returned no choices: "
                                f"{(response.model_extra or {}).get('error')}")
@@ -186,7 +221,25 @@ class LLMClient:
             "cost_usd": float(usage.get("cost") or 0.0),
             "dropped_parameters": sorted(set(optional) - set(sent)),
             "warnings": [] if supported else [EMPTY_SUPPORTED_WARNING],
+            "attempts": attempts,
         }
+
+    async def _create(self, kwargs: dict):
+        """One completion, retried up to MAX_RETRIES times. Returns (response, attempts)."""
+        attempts = []
+        for n in range(1, config.MAX_RETRIES + 1):
+            try:
+                response = await self._client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                attempts.append({"n": n, "error": _public_error(exc)})
+                exc.attempts = list(attempts)
+                if not _retryable(exc) or n == config.MAX_RETRIES:
+                    raise
+                await asyncio.sleep(_backoff(n))
+            else:
+                attempts.append({"n": n, "error": None})
+                return response, attempts
+        raise RuntimeError("LLM retry loop ended without a result or an error.")
 
     def _count(self, result: LLMResult) -> None:
         t = self.totals
