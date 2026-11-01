@@ -1164,3 +1164,70 @@ Installed Colima (and its Lima dependency) because this machine had Docker CLI/b
 Ran the container as its normal non-root user on temporary localhost port 8503. Docker health status was healthy and the host HTTP health endpoint returned ok. Inside the image, all source modules imported, prepared data existed, .env/secrets.toml were absent, Streamlit AppTest rendered the app and navigated to History, and a real stdio MCP subprocess listed seven tools and ranked buyers. A separate host FastMCP client launched the image with docker run -i, listed seven tools and retrieved the dataset overview. Submission persistence write/read/delete also passed inside the container. No paid model calls or API keys were used.
 
 No additional application/Docker fixes were required. Stopped and removed the test container and stopped the wb-test Colima profile; Colima installation and the cached test image remain available. Build log /tmp/wb-docker-build.log and smoke-test log /tmp/wb-container-smoke.log. This verifies the ARM64 image/runtime; no separate x86_64 build or live model generation was tested in Docker. Nothing staged, committed or pushed.
+
+## 2026-11-01 — Continue research across browser refreshes
+
+Explicitly authorized browser-independent execution (the earlier no-background-worker
+rule is updated in AGENTS.md). Added `research/jobs.py`: one process-local thread per
+accepted job, no Streamlit calls in the worker, atomic submission before execution,
+active-request deduplication, and one active follow-up per run to protect saved answers
+and sources. The existing agent, ranking, MCP, verification and repair logic is unchanged.
+
+The UI publishes a job URL and polls activity once per second. Fresh browser sessions
+observe the same worker and load the saved run/answer when it finishes. History and
+sidebar navigation reconnect to pending requests. Active requests cannot be deleted;
+failures retain sanitized errors and activity. Retry preserves edited target/exclusion
+inputs. Stopping/restarting the server interrupts work: no automatic replay, durable
+step checkpointing, or multi-process worker coordination is claimed.
+
+Validation includes blocked-worker tests with fresh Streamlit AppTest instances for
+research and follow-ups, duplicate submission, one saved answer, navigation during work,
+delete refusal, failed-request retry, server-restart interruption without execution,
+concurrent follow-up refusal, and preserving edited target inputs. Existing UI tests
+now explicitly wait for the background worker then rerender, keeping their output
+assertions. No real LLM calls or provider charges in these tests.
+
+Final verification: `.venv/bin/pytest -q` — **290 passed, 1 skipped in 74.03s**
+(`/tmp/wb-recovery-final.log`). `git diff --check` passed. No commits or pushes made.
+
+## 2026-11-01 — Split the Streamlit UI by responsibility
+
+Reduced `app.py` from 2,003 lines to 100 lines of page setup and screen orchestration.
+Moved UI code into `ui/navigation.py`, `sessions.py`, `sidebar.py`, `chat.py`,
+`target_form.py`, `report_panel.py`, `activity_view.py`, `common.py`, and `styles.py`.
+Existing `reports.py` and `activity.py` remain the rendering foundations. Explicit
+imports form an acyclic dependency graph; no shared-global injection or compatibility
+wrapper is used. Updated architecture documentation and the AGENTS folder map.
+
+Compared function ASTs against the pre-split source: all 104 functions are present,
+103 unchanged. `missing_files` now reads configured paths at call time because UI
+modules remain imported across Streamlit reruns. CSS and citation JavaScript values
+are identical. Added the standard main guard so importing the entry module does not
+render a page. Three direct helper imports in tests now point to `ui.sessions`;
+assertions and model/guardrail checks were not weakened. Research execution, job
+recovery, prompts, calculations, and saved-data formats were not changed in this split.
+
+Verification: UI and recovery suite (`tests/test_app.py tests/test_jobs.py`) —
+**44 passed, 1 skipped in 21.84s**. Imported all 11 UI modules and the entry point
+with page rendering prohibited: passed, no research started. `git diff --check` passed.
+
+Full suite on the final split: `.venv/bin/pytest -q` — **290 passed, 1 skipped in
+64.71s** (`/tmp/wb-ui-split-full.log`), including refresh recovery. No commits or pushes.
+
+## 2026-11-01 — Remove explanatory running banner
+
+Removed the refresh/background-processing note from the job screen. The existing
+live step and expandable Agent activity remain. Recovery tests now check that
+activity indicator instead of the removed banner: 7 passed in 5.06s
+(`tests/test_jobs.py`). `git diff --check` passed.
+
+## 2026-11-01 — Keep live call details below activity
+
+Moved live progress below the Agent activity expander. While running, assumptions
+appear inside its details. Replaced narrative live-stage labels with recorded call
+metadata (MCP tool name or LLM model, plus buyer when available); app/calculation
+stages and idle periods do not emit filler text. Detailed event history remains
+available in the expander. No committee/research logic changed.
+
+Validation: UI and recovery tests — 44 passed, 1 skipped in 20.76s
+(`/tmp/wb-live-metadata-tests.log`). `git diff --check` passed.

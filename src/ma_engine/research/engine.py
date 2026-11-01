@@ -497,7 +497,7 @@ def _append_followup(run_dir: Path, result: FollowupResult) -> None:
 
 
 async def run_followup(question: str, run: dict, use_cache: bool = True,
-                       progress=None) -> FollowupResult:
+                       progress=None, submission_id=None) -> FollowupResult:
     """Answer one follow-up with one LLM client and exactly one MCP session.
 
     Appends the answer to `followups.json` in the run folder so a saved run keeps its Q&A.
@@ -505,7 +505,7 @@ async def run_followup(question: str, run: dict, use_cache: bool = True,
     run_dir = run.get("run_dir")
     if not run_dir:
         raise ValueError("This run has no folder (run_dir), so the follow-up cannot be saved.")
-    submission = submissions.begin(question, run.get("run_id") or Path(run_dir).name)
+    submission = submission_id or submissions.begin(question, run.get("run_id") or Path(run_dir).name)
     try:
         result = await _run_followup_saved(question, run, use_cache, progress)
     except BaseException:

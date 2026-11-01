@@ -32,7 +32,8 @@ src/ma_engine/research/agent.py     the tool-calling research and writing loop
 src/ma_engine/validation/guardrails.py report checks: citations, numbers, wording
 src/ma_engine/research/engine.py    run_engine(target): the full pipeline
 src/ma_engine/prompts/     prompt text files
-src/ma_engine/app.py       Streamlit interface
+src/ma_engine/app.py       Streamlit page setup and screen orchestration
+src/ma_engine/ui/          navigation, sessions, chat, report panels, activity and styles
 tests/                     pytest tests
 outputs/sample/            one committed example run
 outputs/runs/              per-run outputs and traces (not committed)
@@ -71,7 +72,7 @@ If a new number is needed, add it to `prepare.py` (or `ranking.py` if it depends
 
 ## Rule 4 — Keep the code small
 - No unused classes, factories, abstract base classes, placeholder modules, or empty files.
-- No extra databases, vector stores, background workers, or agent frameworks.
+- No extra databases, vector stores, or agent frameworks. Browser-independent execution uses the explicitly authorized process-local worker in research/jobs.py; no external worker service.
 - Small functions with clear names. Add a class only when it clearly helps (the clients are fine as classes).
 - Reuse the three clients. Never open a new LLM or MCP connection per buyer or per tool call.
 - Keep the UI, agent, MCP tools, and calculations in separate files.

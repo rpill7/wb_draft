@@ -222,19 +222,24 @@ def activity_label(totals: dict | None, *, failed: bool = False) -> str:
     return " · ".join(parts)
 
 
-def live_label(events: list[dict], names: dict[str, str] | None = None,
-               default: str = "Researching buyers…") -> str:
-    """What the agent is doing now, from the latest step still running."""
+def live_label(events: list[dict], names: dict[str, str] | None = None) -> str:
+    """Actual active call metadata; no narrative stage labels or placeholder text."""
     names = names or {}
     running = [event for event in merge_steps(events) if event.get("status") == "running"]
     if not running:
-        return default
+        return ""
     event = running[-1]
+    category = event.get("category")
+    if category == "mcp_tool":
+        parts = ["MCP", event.get("name")]
+    elif category == "llm":
+        parts = ["LLM", (event.get("input") or {}).get("model")]
+    else:
+        return ""
     buyer = event.get("acquirer_key")
-    who = f" for {names.get(buyer, buyer)}" if buyer else ""
-    if event.get("category") == "mcp_tool":
-        return f"Calling {event.get('name')}{who}…"
-    return f"{step_name(event)}{who}…"
+    if buyer:
+        parts.append(names.get(buyer, buyer))
+    return " · ".join(str(part) for part in parts if part)
 
 
 def _identity(value):

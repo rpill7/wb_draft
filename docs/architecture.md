@@ -20,6 +20,28 @@ The public Make commands and Streamlit/MCP launch paths are unchanged. Direct
 module commands use `ma_engine.data.prepare`, `ma_engine.data.ranking`,
 `ma_engine.research.engine`, and `ma_engine.validation.guardrails`.
 
+### Streamlit UI modules
+
+`app.py` only configures the page and selects the active screen. UI modules use
+explicit imports with no circular dependencies:
+
+| Module under `ui/` | Responsibility |
+|---|---|
+| `navigation.py` | URL restoration/publication and navigation callbacks |
+| `sessions.py` | Saved-run catalog, session state, labels and deletion persistence |
+| `sidebar.py` | Sidebar, History/About pages and deletion confirmation |
+| `chat.py` | Research submission, background-job polling and follow-up conversation |
+| `target_form.py` | Target editor and request cards |
+| `report_panel.py` | Buyer report tabs, export and previous/next controls |
+| `activity_view.py` | Activity panels assembled from recorded events |
+| `common.py` | Shared display helpers and read-only report-data access |
+| `styles.py` | Existing CSS and citation-popover JavaScript |
+
+The existing `reports.py` and `activity.py` continue to provide report HTML and
+activity timeline rendering. Execution remains in `research/jobs.py` and the
+research engine; UI imports do not start model work. Widget keys, URL parameters
+and session-state fields are unchanged by the UI split.
+
 ## 1. Overview
 
 The engine takes a target company profile (by default a private, regional Healthcare Services business worth about $200M with strong EBITDA margins) and returns the 10 buyers most likely to acquire it, each with a one-page, source-cited report. The work is split so that the AI never does arithmetic. Python prepares every statistic ahead of time from the 500-row transaction CSV (`prepare.py`) and scores buyers for the given target (`ranking.py`). A FastMCP server exposes the data as read-only tools. For each buyer, an AI agent chooses which tools to call, reads the results and writes the report. Python then checks every statement against the exact tool results that agent received (`guardrails.py`). A report that still fails after one repair attempt is kept and clearly marked "Not verified". A Streamlit app is display only: chat request, parsed target, `run_engine` with live activity, results dashboard, then follow-up chat.
@@ -33,7 +55,8 @@ flowchart TD
         PREP --> PROC[("data/processed/<br/>6 pre-calculated tables")]
     end
 
-    UI["Streamlit UI, display only<br/>chat, live activity, results, follow-up"] -->|"chat request"| PARSE["parse_target<br/>one structured LLM call"]
+    UI["Streamlit UI, display only<br/>chat, live activity, results, follow-up"] -->|"save question and job ID"| JOB["jobs.py: process-local background thread<br/>refresh observes; never resubmits"]
+    JOB -->|"research request"| PARSE["parse_target<br/>one structured LLM call"]
     PARSE --> VALID["Python validates with Target<br/>regional or local, no named region, becomes Any region<br/>unstated fields use the default target and are listed"]
     VALID -->|"run_engine(target)"| START["engine.py: run_engine<br/>one LLM client, one MCP session"]
     START --> RANK["Rank buyers<br/>rank_acquirers tool, no AI"]
@@ -50,7 +73,7 @@ flowchart TD
     STATUS --> COMM["Committee review: one LLM call<br/>conviction may move one step<br/>each change re-checked"]
     COMM --> SAVE["Save to outputs/runs/RUN_ID/<br/>reports.json, reports.md, ranking.json,<br/>trace.json with events, mcp_server.log"]
     SAVE -->|"reports, ranking, trace"| UI
-    UI -->|"follow-up question"| FOLLOW["run_followup<br/>one LLM client, one MCP session"]
+    JOB -->|"follow-up question"| FOLLOW["run_followup<br/>one LLM client, one MCP session"]
     FOLLOW --> FLOOP["Shared tool loop<br/>six research tools, up to 4 rounds"]
     FLOOP --> FWRITE["Follow-up write call<br/>strict FollowupAnswer JSON"]
     FWRITE --> FCHECK{"check_statements<br/>any issues?"}
@@ -291,3 +314,21 @@ The client will see all seven tools, including `rank_acquirers`, with their docs
 - **A hand-written loop instead of an agent framework.** The tool loop is one function in `agent.py`, shared by buyer research and follow-up answers. Every step is visible and testable: the round limit, parallel tool calls, the repeated-call cache, the final write call with a strict schema, and the single repair. Frameworks would add hidden retries, prompts and state that are harder to control under the "AI never calculates" and citation rules.
 - **stdio transport.** The server runs as a child process of the app over a private pipe. It opens no network port, needs no extra service, and starts and stops with the run, so the app still starts with one command and the container exposes only port 8501. FastMCP's stdio transport passes only a few basic variables (such as `HOME` and `PATH`) to the server, so the API key does not reach it. HTTP transport is the natural next step if the tools ever need to be shared across machines.
 - **A disk cache for repeatability.** OpenRouter's model list (checked 2026-10-31, recorded in `plans/PROGRESS.md`) shows that `anthropic/claude-sonnet-5.5` does not accept `temperature` or `seed`. Because the client asks OpenRouter to route only to providers that support every parameter sent (`require_parameters`), sending them would leave no provider. So they are dropped for this model (recorded in the trace as `dropped_parameters`), and `reasoning_effort = "low"` is sent because the model supports it. Repeat runs of the same target are identical only because of the response cache in `.cache/llm/`: the second run answers every call from disk with no network calls and no cost. A run with `use_cache=False` skips reading the cache, asks the model again and stores the new answers.
+
+## Browser refresh and execution
+
+`research/jobs.py` owns execution independently of Streamlit's script thread.
+The UI saves a submission, publishes `?job=<id>`, and polls once per second.
+Research and follow-ups continue when a browser refreshes or disconnects, provided
+the application process remains running. Completion redirects to the saved run URL.
+
+A lock coalesces identical active submissions. Only one follow-up per research run
+may execute at a time, preventing concurrent source-registry and answer writes;
+a distinct concurrent follow-up receives a busy message rather than being discarded.
+Running requests cannot be deleted through the UI. Saved failed requests retain
+sanitized errors and activity, and can be retried explicitly.
+
+This is a single-process deployment, not a durable job queue. A server restart or
+`make stop` ends its workers. Outstanding submissions are then displayed as interrupted;
+there is no automatic replay, step checkpointing, or multi-process coordination.
+Completed answers remain persisted using the existing engine files.

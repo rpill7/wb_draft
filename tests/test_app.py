@@ -49,6 +49,27 @@ def folders(tmp_path, monkeypatch):
     return tmp_path
 
 
+@pytest.fixture(autouse=True)
+def wait_for_background_answers(monkeypatch):
+    """Existing output assertions wait for completion, as the browser poller does.
+
+    Dedicated test_jobs tests keep workers blocked to check refresh while running.
+    """
+    from ma_engine.research import jobs
+    original = AppTest._run
+    def run_and_poll(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        token = self.query_params.get('job')
+        if isinstance(token, list):
+            token = token[0]
+        if token and token in jobs._jobs:
+            jobs._jobs[token]['thread'].join(180)
+            assert not jobs._jobs[token]['thread'].is_alive()
+            result = original(self, timeout=kwargs.get("timeout"))
+        return result
+    monkeypatch.setattr(AppTest, '_run', run_and_poll)
+
+
 def start(timeout: float = 60) -> AppTest:
     return AppTest.from_file(APP, default_timeout=timeout).run(timeout=timeout)
 
@@ -188,8 +209,10 @@ def test_running_and_completed_events_merge_and_rounds_stay_with_the_buyer():
     assert [event["step"] for event in merged] == [1, 2, 3, 4, 5], "one row per step"
     assert merged[1]["status"] == "completed"
     assert live_label(events, {"blackstone": "Blackstone"}) == (
-        "Calling get_acquirer_deals for Blackstone…")
-    assert live_label(events[:1]) == "Researching buyers…"
+        "MCP · get_acquirer_deals · Blackstone")
+    assert live_label(events[:1]) == ""
+    assert live_label([{"step": 1, "category": "llm", "name": "committee",
+                        "status": "running", "input": {"model": "provider/model"}}]) == "LLM · provider/model"
     ordered = order_events(events)
     buyers = [event.get("acquirer_key") for event in ordered]
     assert buyers[0] is None and buyers[-1] is None
@@ -443,7 +466,7 @@ def cite_view(html: str, source_id: str) -> str:
 # ---------- app ----------
 
 def test_sidebar_size_text_drops_only_a_whole_million_decimal():
-    from ma_engine.app import sidebar_size_text
+    from ma_engine.ui.sessions import sidebar_size_text
 
     assert sidebar_size_text("$200.0M") == "$200M"
     assert sidebar_size_text("$1,234.0M") == "$1,234M"
@@ -452,7 +475,7 @@ def test_sidebar_size_text_drops_only_a_whole_million_decimal():
 
 
 def test_sidebar_run_text_keeps_two_lines_and_the_full_time(tmp_path):
-    from ma_engine.app import sidebar_run_text
+    from ma_engine.ui.sessions import sidebar_run_text
 
     folder = tmp_path / "20261101-014500"
     folder.mkdir()
@@ -471,7 +494,7 @@ def test_sidebar_run_text_keeps_two_lines_and_the_full_time(tmp_path):
 
 
 def test_sidebar_run_text_uses_the_saved_title(tmp_path):
-    from ma_engine.app import sidebar_run_text
+    from ma_engine.ui.sessions import sidebar_run_text
 
     folder = tmp_path / "20261101-014500"
     folder.mkdir()
@@ -952,7 +975,7 @@ def test_each_followup_keeps_its_own_activity_and_a_failed_one_keeps_its_partial
     run = asyncio.run(engine.run_engine(config.DEFAULT_TARGET))
     calls = []
 
-    async def fake_followup(question, run, use_cache=True, progress=None):
+    async def fake_followup(question, run, use_cache=True, progress=None, submission_id=None):
         calls.append(question)
         if question == "boom":
             for event in _tool_events(question, "running"):

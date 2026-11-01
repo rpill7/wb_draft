@@ -11,9 +11,10 @@ from uuid import uuid4
 from ma_engine import config
 
 
-def begin(question: str, run_id: str | None = None) -> str:
+def begin(question: str, run_id: str | None = None, *, target=None, excluded=()) -> str:
     token = uuid4().hex
     _save(token, {'id': token, 'question': question, 'run_id': run_id,
+                  'target': target, 'excluded': list(excluded),
                   'created_at': datetime.now(timezone.utc).isoformat(), 'status': 'pending'})
     return token
 
@@ -44,13 +45,14 @@ def _edit_lock():
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def finish(token: str, status: str, run_id: str | None = None):
+def finish(token: str, status: str, run_id: str | None = None, **details):
     with _edit_lock():
         path = _path(token)
         if not path.exists():
             return  # A deleted question must not be recreated by a late completion.
         record = json.loads(path.read_text(encoding='utf-8'))
         record['status'] = status
+        record.update(details)
         if run_id is not None:
             record['run_id'] = run_id
         _save(token, record)
@@ -74,3 +76,10 @@ def unfinished():
                 continue
             records.append(record)
     return sorted(records, key=lambda r: r['created_at'], reverse=True)
+
+
+def get(token):
+    try:
+        return json.loads(_path(token).read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return None
